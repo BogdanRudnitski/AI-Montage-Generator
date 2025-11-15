@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# Environment variables
+.env
+
+# IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# MacOS
+.DS_Store
+
+# Logs
+*.log
+
+# Media/large files you don't want to track
+*.mp4
+*.mp3
+*.wav
+*.flac
+
+# Model files (YAMNet or others)
+*.h5
+*.ckpt
+*.tflite
+*.pb
+*.onnx
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Optional: temp or cache folders
+__pycache__/
+*.tmp
+*.cache/
