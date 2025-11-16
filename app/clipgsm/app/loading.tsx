@@ -9,6 +9,7 @@ export default function LoadingScreen() {
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState("Initializing...");
   const pulseAnim = new Animated.Value(1);
+  const hasNavigated = React.useRef(false);
 
   useEffect(() => {
     // Pulse animation
@@ -51,13 +52,14 @@ export default function LoadingScreen() {
         const res = await fetch(`${SERVER_URL}/latest-video`);
         const data = await res.json();
         
-        if (data.found) {
+        if (data.found && !hasNavigated.current) {
+          hasNavigated.current = true;
           clearInterval(pollInterval);
           setProgress(100);
           setStatus("Complete!");
           
           setTimeout(() => {
-            router.replace({
+            router.push({
               pathname: "/result",
               params: { 
                 videoUrl: data.url,

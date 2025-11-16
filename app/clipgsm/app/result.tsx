@@ -20,6 +20,7 @@ export default function ResultScreen() {
   const [downloadedFileUri, setDownloadedFileUri] = useState<string | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
   const videoRef = React.useRef<Video>(null);
+  const hasInitialized = React.useRef(false); // Track if already initialized
 
   const videoUrl = params.videoUrl as string;
   const videoName = params.videoName as string;
