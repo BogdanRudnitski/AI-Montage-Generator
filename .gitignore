@@ -51,3 +51,5 @@ __pycache__/
 node_modules/
 
 expo-env.d.ts
+
+audio_analysis.json
