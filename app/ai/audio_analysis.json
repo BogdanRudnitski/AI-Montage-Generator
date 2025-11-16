@@ -581,7 +581,7 @@
     }
   },
   "Starships%20-%20Nicki%20Minaj%20-%20SoundLoadMate.com.mp3": {
-    "last_analyzed": "2025-11-16 01:19:09",
+    "last_analyzed": "2025-11-16 03:37:43",
     "duration": 60.0,
     "full_duration": 210.65251700680273,
     "max_duration": 60,
@@ -608,13 +608,13 @@
       24.19519274376417,
       24.659591836734695
     ],
-    "total_candidates": 382,
+    "total_candidates": 389,
     "cut_points": [
       {
         "timestamp": 7.366530612244898,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 184.63188197018135,
+        "strength": 180.81954932463623,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -623,7 +623,7 @@
         "timestamp": 7.976054421768708,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 262.60384067062927,
+        "strength": 265.22526361111267,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -632,7 +632,7 @@
         "timestamp": 8.70748299319728,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 183.69312332042716,
+        "strength": 182.8741631785082,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -641,7 +641,7 @@
         "timestamp": 9.317006802721089,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 160.36480689544027,
+        "strength": 161.14926159172333,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -650,7 +650,7 @@
         "timestamp": 9.926530612244898,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 328.2803161903124,
+        "strength": 327.5132185538879,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -659,7 +659,7 @@
         "timestamp": 10.65795918367347,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 154.1206676050841,
+        "strength": 154.8193379783148,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -668,7 +668,7 @@
         "timestamp": 11.38938775510204,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 184.35497675727729,
+        "strength": 187.91008878965204,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -677,7 +677,7 @@
         "timestamp": 12.242721088435374,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 272.16419676584087,
+        "strength": 276.4094201017714,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -686,7 +686,7 @@
         "timestamp": 12.910294784580499,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 167.027678305421,
+        "strength": 164.14565240718704,
         "on_grid": false,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -695,7 +695,7 @@
         "timestamp": 13.827482993197279,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 159.3827770864138,
+        "strength": 157.87030028888893,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -704,7 +704,7 @@
         "timestamp": 14.43700680272109,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 291.30098221366893,
+        "strength": 291.3590395530407,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -713,7 +713,7 @@
         "timestamp": 15.046530612244899,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 236.57524843168227,
+        "strength": 236.71520289802683,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -722,7 +722,7 @@
         "timestamp": 15.656054421768708,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 251.3710104358473,
+        "strength": 251.2674404214913,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -731,7 +731,7 @@
         "timestamp": 16.631292517006802,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 139.13668493979364,
+        "strength": 137.9200727535846,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -740,7 +740,7 @@
         "timestamp": 17.6065306122449,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 445.9004404916057,
+        "strength": 446.2205355881923,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -749,7 +749,7 @@
         "timestamp": 18.52952380952381,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 142.9156836939976,
+        "strength": 141.18249823180398,
         "on_grid": false,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -758,7 +758,7 @@
         "timestamp": 19.43510204081633,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 241.71142642378229,
+        "strength": 240.73577554779993,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -767,7 +767,7 @@
         "timestamp": 20.82829931972789,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 153.6523108686669,
+        "strength": 153.62549290716242,
         "on_grid": false,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -776,7 +776,7 @@
         "timestamp": 21.751292517006803,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 255.09537596799157,
+        "strength": 251.83704333818616,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -785,7 +785,7 @@
         "timestamp": 22.482721088435376,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 435.8526565191426,
+        "strength": 434.8119717587933,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -794,7 +794,7 @@
         "timestamp": 23.214149659863946,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 262.1787444099621,
+        "strength": 277.3615385419967,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -803,7 +803,7 @@
         "timestamp": 23.94557823129252,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 244.69056014791465,
+        "strength": 256.3308900560093,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -812,7 +812,7 @@
         "timestamp": 24.79891156462585,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 369.09822074714526,
+        "strength": 367.81367118938243,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -821,7 +821,7 @@
         "timestamp": 25.530340136054424,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 185.02828699526182,
+        "strength": 194.00187607636198,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -830,7 +830,7 @@
         "timestamp": 26.33142857142857,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 250.8441589510417,
+        "strength": 251.09794911199148,
         "on_grid": false,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -839,7 +839,7 @@
         "timestamp": 26.993197278911566,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 180.78661707368542,
+        "strength": 166.52511244537783,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -848,7 +848,7 @@
         "timestamp": 27.724625850340136,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 235.62382813361384,
+        "strength": 231.83286965331249,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -857,7 +857,7 @@
         "timestamp": 28.943673469387754,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 170.00785304792132,
+        "strength": 153.27487834379178,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -866,7 +866,7 @@
         "timestamp": 30.4065306122449,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 162.03488562194332,
+        "strength": 147.8261986007451,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -875,17 +875,17 @@
         "timestamp": 31.068299319727892,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 261.9196226331553,
+        "strength": 243.25513096013677,
         "on_grid": false,
         "description": "Vocal Transient",
         "repetition_gap": null
       },
       {
-        "timestamp": 31.62557823129252,
+        "timestamp": 31.811337868480727,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 159.38718506068227,
-        "on_grid": true,
+        "strength": 246.78574762243392,
+        "on_grid": false,
         "description": "Vocal Transient",
         "repetition_gap": null
       },
@@ -893,7 +893,7 @@
         "timestamp": 32.35700680272109,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 233.43515985031985,
+        "strength": 212.2922507268054,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -902,7 +902,7 @@
         "timestamp": 33.57605442176871,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 198.21234375634103,
+        "strength": 201.924643051005,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -911,7 +911,7 @@
         "timestamp": 34.18557823129252,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 181.47619956354274,
+        "strength": 208.94523262821863,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -920,7 +920,7 @@
         "timestamp": 35.40462585034014,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 174.4390151723233,
+        "strength": 177.26481623682224,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -929,7 +929,7 @@
         "timestamp": 36.37986394557823,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 207.52828698073702,
+        "strength": 190.1720615614861,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -938,16 +938,16 @@
         "timestamp": 37.47700680272109,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 227.41566750957193,
+        "strength": 219.3613416413381,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
       },
       {
-        "timestamp": 38.0865306122449,
+        "timestamp": 38.330340136054424,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 151.45474363024107,
+        "strength": 138.3289518744522,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -956,7 +956,7 @@
         "timestamp": 40.28081632653061,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 209.55695496374054,
+        "strength": 207.3138372291546,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -965,7 +965,7 @@
         "timestamp": 41.9352380952381,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 372.14725486321845,
+        "strength": 378.4377933323655,
         "on_grid": false,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -974,7 +974,7 @@
         "timestamp": 42.59700680272109,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 328.64464207924084,
+        "strength": 322.17203602860207,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -983,7 +983,7 @@
         "timestamp": 44.05986394557823,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 207.813264802048,
+        "strength": 209.57238464254783,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -992,7 +992,7 @@
         "timestamp": 44.72163265306123,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 143.66756756823685,
+        "strength": 143.53367919094865,
         "on_grid": false,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -1001,7 +1001,16 @@
         "timestamp": 45.27891156462585,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 221.80137334524608,
+        "strength": 216.72693391129684,
+        "on_grid": true,
+        "description": "Vocal Transient",
+        "repetition_gap": null
+      },
+      {
+        "timestamp": 46.010340136054424,
+        "score": 100,
+        "type": "vocal_transient",
+        "strength": 280.9681254787573,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -1010,7 +1019,7 @@
         "timestamp": 48.76190476190476,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 161.3599190747129,
+        "strength": 184.3560784706092,
         "on_grid": false,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -1019,7 +1028,7 @@
         "timestamp": 49.54557823129252,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 243.6878649932811,
+        "strength": 278.13998761203874,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -1028,7 +1037,7 @@
         "timestamp": 50.27700680272109,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 259.03699324801244,
+        "strength": 310.9144741520831,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -1037,16 +1046,25 @@
         "timestamp": 53.93414965986395,
         "score": 100,
         "type": "pattern_change",
-        "strength": 0.9422171885189257,
+        "strength": 0.9396557966326378,
         "on_grid": true,
         "description": "Pattern Change",
+        "repetition_gap": null
+      },
+      {
+        "timestamp": 55.58857142857143,
+        "score": 100,
+        "type": "vocal_transient",
+        "strength": 140.11426289497493,
+        "on_grid": false,
+        "description": "Vocal Transient",
         "repetition_gap": null
       },
       {
         "timestamp": 56.49414965986394,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 137.60722660247873,
+        "strength": 152.92123536635523,
         "on_grid": true,
         "description": "Vocal Transient",
         "repetition_gap": null
@@ -1055,46 +1073,64 @@
         "timestamp": 57.95700680272109,
         "score": 100,
         "type": "vocal_transient",
-        "strength": 247.84796294343735,
+        "strength": 281.1956915299267,
         "on_grid": true,
         "description": "Vocal Transient",
+        "repetition_gap": null
+      },
+      {
+        "timestamp": 34.795102040816325,
+        "score": 75,
+        "type": "drum_low",
+        "strength": 0.9457005262374878,
+        "on_grid": true,
+        "description": "Drum Low",
         "repetition_gap": null
       },
       {
         "timestamp": 29.553197278911565,
         "score": 67,
         "type": "drum_low",
-        "strength": 0.95832359790802,
+        "strength": 0.9617906808853149,
         "on_grid": true,
         "description": "Drum Low",
         "repetition_gap": null
       },
       {
-        "timestamp": 46.25414965986395,
-        "score": 61,
-        "type": "vocal_repetition",
-        "strength": 0.1113472506403923,
-        "on_grid": true,
-        "description": "Vocal Repetition",
-        "repetition_gap": 0.9752380952380975
-      },
-      {
         "timestamp": 39.061768707483,
         "score": 44,
         "type": "vocal_repetition",
-        "strength": 0.035958319902420044,
+        "strength": 0.036352645605802536,
         "on_grid": true,
         "description": "Vocal Repetition",
-        "repetition_gap": 0.905578231292516
+        "repetition_gap": 0.789478458049885
       },
       {
         "timestamp": 3.465578231292517,
         "score": 39,
         "type": "vocal_repetition",
-        "strength": 0.05196530744433403,
+        "strength": 0.051826342940330505,
         "on_grid": true,
         "description": "Vocal Repetition",
         "repetition_gap": 0.27863945578231286
+      },
+      {
+        "timestamp": 6.269387755102041,
+        "score": 39,
+        "type": "vocal_repetition",
+        "strength": 0.052212197333574295,
+        "on_grid": true,
+        "description": "Vocal Repetition",
+        "repetition_gap": 0.2786394557823124
+      },
+      {
+        "timestamp": 52.83700680272109,
+        "score": 39,
+        "type": "vocal_repetition",
+        "strength": 0.05339406803250313,
+        "on_grid": true,
+        "description": "Vocal Repetition",
+        "repetition_gap": 0.27863945578231863
       }
     ],
     "settings": {
