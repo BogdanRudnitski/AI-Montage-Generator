@@ -1,9 +1,10 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import os
 import shutil
+import json
 from typing import List, Optional
 from pathlib import Path
 import subprocess
@@ -95,7 +96,8 @@ def convert_video_to_h264(video_path: str) -> str:
 @app.post("/upload")
 async def upload_media(
     files: List[UploadFile] = File(...),
-    song: Optional[UploadFile] = File(None)
+    song: Optional[UploadFile] = File(None),
+    max_duration: str = Form("30")
 ):
     # Clear previous uploads
     shutil.rmtree("uploads/media", ignore_errors=True)
@@ -129,8 +131,21 @@ async def upload_media(
         song_saved = song.filename
         print(f"Saved song: {song_path}")
 
+    # Save options.json with max_duration
+    options_data = {
+        "max_duration": int(max_duration)
+    }
+    options_path = "uploads/options.json"
+    with open(options_path, "w") as f:
+        json.dump(options_data, f, indent=2)
+    print(f"Saved options: {options_data}")
+
     print(f"Total files saved: {saved_files}")
-    return {"files_saved": saved_files, "song_saved": song_saved}
+    return {
+        "files_saved": saved_files, 
+        "song_saved": song_saved,
+        "max_duration": int(max_duration)
+    }
 
 # -------------------------
 # GENERATE CLIP
@@ -292,80 +307,184 @@ async def viewer():
     <title>Media Gallery</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        * {{ box-sizing: border-box; }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-            margin:0; padding:20px; background:#f8f9fa;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
         }}
-        h1 {{ text-align:center; color:#333; }}
-        h2 {{ color:#555; margin-top:30px; }}
+        .container {{
+            max-width: 1400px;
+            margin: 0 auto;
+        }}
+        header {{
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+            padding: 40px 20px;
+        }}
+        h1 {{
+            font-size: 48px;
+            font-weight: 800;
+            margin-bottom: 12px;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }}
+        .subtitle {{
+            font-size: 18px;
+            opacity: 0.95;
+            font-weight: 500;
+        }}
+        .section {{
+            background: white;
+            border-radius: 24px;
+            padding: 32px;
+            margin-bottom: 24px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }}
+        h2 {{
+            font-size: 24px;
+            font-weight: 700;
+            color: #1a1a1a;
+            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        .count-badge {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 600;
+        }}
         .grid {{ 
-            display:grid; 
-            grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); 
-            gap:20px; 
-            margin-top:20px;
+            display: grid; 
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); 
+            gap: 24px;
         }}
         .item {{ 
-            background:white; 
-            border-radius:16px; 
-            overflow:hidden; 
-            box-shadow:0 2px 8px rgba(0,0,0,0.1);
-            transition: transform 0.2s;
+            background: #f8f9fa;
+            border-radius: 20px;
+            overflow: hidden;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            position: relative;
         }}
-        .item:hover {{ transform: translateY(-4px); box-shadow:0 4px 12px rgba(0,0,0,0.15); }}
+        .item:hover {{ 
+            transform: translateY(-8px); 
+            box-shadow: 0 20px 40px rgba(102, 126, 234, 0.3);
+        }}
         .item img, .item video {{ 
-            width:100%; 
-            height:280px; 
-            object-fit:cover; 
-            display:block;
-            background:#e9ecef;
+            width: 100%; 
+            height: 320px; 
+            object-fit: cover; 
+            display: block;
+            background: linear-gradient(135deg, #e9ecef 0%, #dee2e6 100%);
         }}
         .name {{ 
-            padding:12px 16px; 
-            font-size:14px; 
-            word-break:break-word;
-            color:#495057;
-            border-top: 1px solid #e9ecef;
+            padding: 16px 20px; 
+            font-size: 14px; 
+            font-weight: 600;
+            word-break: break-word;
+            color: #495057;
+            background: white;
+        }}
+        .type-badge {{
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(10px);
+            color: white;
+            padding: 6px 12px;
+            border-radius: 8px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
         }}
         audio {{ 
-            width:100%; 
-            margin-top:10px;
-            padding: 0 16px 16px;
+            width: 100%;
+            margin-top: 12px;
+        }}
+        .audio-item {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 20px;
+            padding: 24px;
+            color: white;
+            transition: all 0.3s ease;
+        }}
+        .audio-item:hover {{
+            transform: translateY(-4px);
+            box-shadow: 0 20px 40px rgba(102, 126, 234, 0.4);
+        }}
+        .audio-item .name {{
+            color: white;
+            background: transparent;
+            font-size: 16px;
+            padding: 0 0 12px 0;
         }}
         .empty {{
-            text-align:center;
-            padding:40px;
-            color:#adb5bd;
-            font-style:italic;
+            text-align: center;
+            padding: 80px 40px;
+            color: #adb5bd;
+            font-size: 16px;
+            font-weight: 500;
+        }}
+        .empty-icon {{
+            font-size: 64px;
+            margin-bottom: 16px;
+            opacity: 0.5;
         }}
         .error-img {{
-            background:#f8d7da;
-            color:#721c24;
-            padding:20px;
-            text-align:center;
+            background: linear-gradient(135deg, #f8d7da 0%, #f5c2c7 100%);
+            color: #721c24;
+            padding: 40px 20px;
+            text-align: center;
+            font-weight: 600;
+        }}
+        video::-webkit-media-controls {{
+            filter: brightness(1.1);
+        }}
+        @media (max-width: 768px) {{
+            h1 {{ font-size: 36px; }}
+            .grid {{ grid-template-columns: 1fr; }}
+            .section {{ padding: 20px; }}
         }}
     </style>
     <script>
         function handleImageError(img) {{
-            img.parentElement.innerHTML = '<div class="error-img">⚠️ Failed to load image<br><small>' + img.alt + '</small></div>';
+            img.parentElement.innerHTML = '<div class="error-img"><div class="empty-icon">⚠️</div>Failed to load image<br><small>' + img.alt + '</small></div>';
         }}
     </script>
     </head>
     <body>
-        <h1>📸 Media Gallery</h1>
-        <h2>Images & Videos ({len(media_files)})</h2>
-        <div class="grid">
+        <div class="container">
+            <header>
+                <h1>📸 Media Gallery</h1>
+                <div class="subtitle">Your uploaded content</div>
+            </header>
+
+            <div class="section">
+                <h2>
+                    Images & Videos 
+                    <span class="count-badge">{len(media_files)}</span>
+                </h2>
+                <div class="grid">
     """
 
     if media_files:
         for m in media_files:
             if m["type"] == "image":
                 html += f'''<div class="item">
+                    <span class="type-badge">PHOTO</span>
                     <img src="{m["url"]}" alt="{m["name"]}" loading="lazy" onerror="handleImageError(this)">
                     <div class="name">📷 {m["name"]}</div>
                 </div>'''
             else:
                 html += f'''<div class="item">
+                    <span class="type-badge">VIDEO</span>
                     <video controls preload="metadata">
                         <source src="{m["url"]}" type="video/mp4">
                         <source src="{m["url"]}" type="video/quicktime">
@@ -374,22 +493,31 @@ async def viewer():
                     <div class="name">🎬 {m["name"]}</div>
                 </div>'''
     else:
-        html += '<div class="empty">No media uploaded yet</div>'
+        html += '<div class="empty"><div class="empty-icon">🎬</div>No media uploaded yet</div>'
 
-    html += f"</div><h2>Songs ({len(song_files)})</h2><div class='grid'>"
+    html += f'''</div>
+            </div>
+
+            <div class="section">
+                <h2>
+                    Songs 
+                    <span class="count-badge">{len(song_files)}</span>
+                </h2>
+                <div class="grid">'''
 
     if song_files:
         for s in song_files:
-            html += f'''<div class="item">
+            html += f'''<div class="audio-item">
                 <div class="name">🎵 {s["name"]}</div>
                 <audio controls src="{s["url"]}">Your browser does not support audio playback.</audio>
             </div>'''
     else:
-        html += '<div class="empty">No songs uploaded yet</div>'
+        html += '<div class="empty"><div class="empty-icon">🎵</div>No songs uploaded yet</div>'
 
     html += """
+                </div>
+            </div>
         </div>
-        <div style="height:40px;"></div>
     </body>
     </html>
     """
