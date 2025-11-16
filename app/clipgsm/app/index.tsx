@@ -23,7 +23,7 @@ export default function ExploreScreen() {
   const [generateLoading, setGenerateLoading] = useState(false);
   const [duration, setDuration] = useState<number>(30);
 
-  const SERVER_URL = "http://172.20.10.4:8000";
+  const SERVER_URL = "http://192.168.68.109:8000";
 
   // Check if all media and song are uploaded
   const allUploaded = mediaList.length > 0 && 
