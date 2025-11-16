@@ -6,12 +6,7 @@ import os
 import shutil
 from typing import List, Optional
 from pathlib import Path
-from PIL import Image
-from pillow_heif import register_heif_opener
 import subprocess
-
-# Enable HEIC/HEIF support
-register_heif_opener()
 
 app = FastAPI()
 
@@ -35,37 +30,7 @@ app.mount("/files/songs", StaticFiles(directory="uploads/songs"), name="songs")
 app.mount("/files/final_videos", StaticFiles(directory="uploads/final_videos"), name="final_videos")
 
 # -------------------------
-# HEIC/HEIF -> JPEG
-# -------------------------
-def convert_heic_to_jpg(file_path: str) -> str:
-    """Convert HEIC/HEIF images to JPEG format"""
-    try:
-        print(f"Converting HEIC: {file_path}")
-        img = Image.open(file_path)
-        
-        # Convert to RGB if necessary
-        if img.mode in ('RGBA', 'LA', 'P'):
-            img = img.convert('RGB')
-        
-        # Create new filename with .jpg extension
-        jpg_path = file_path.rsplit('.', 1)[0] + '.jpg'
-        
-        # Save as JPEG
-        img.save(jpg_path, 'JPEG', quality=95)
-        print(f"✓ Converted to: {jpg_path}")
-        
-        # Delete original HEIC file
-        if os.path.exists(file_path) and file_path != jpg_path:
-            os.remove(file_path)
-            print(f"✓ Removed original: {file_path}")
-        
-        return jpg_path
-    except Exception as e:
-        print(f"❌ Error converting HEIC {file_path}: {e}")
-        return file_path
-
-# -------------------------
-# VIDEO CONVERSION & THUMBNAIL
+# VIDEO CONVERSION (NO THUMBNAILS)
 # -------------------------
 def convert_video_to_h264(video_path: str) -> str:
     """Convert video to H.264 for better browser compatibility"""
@@ -124,31 +89,6 @@ def convert_video_to_h264(video_path: str) -> str:
         print(f"Warning: Could not convert video {video_path}: {e}")
         return video_path
 
-def generate_video_thumbnail(video_path: str):
-    """Generate a thumbnail for video files using ffmpeg"""
-    try:
-        thumbnail_path = video_path.rsplit('.', 1)[0] + '_thumb.jpg'
-        
-        # Use ffmpeg to extract a frame at 1 second
-        subprocess.run([
-            'ffmpeg',
-            '-i', video_path,
-            '-ss', '00:00:01',
-            '-vframes', '1',
-            '-vf', 'scale=640:-1',
-            '-y',
-            thumbnail_path
-        ], check=True, capture_output=True)
-        
-        print(f"✓ Generated thumbnail: {thumbnail_path}")
-        return thumbnail_path
-    except subprocess.CalledProcessError as e:
-        print(f"Warning: Could not generate thumbnail for {video_path}: {e}")
-        return None
-    except FileNotFoundError:
-        print("Warning: ffmpeg not found. Install it to enable video thumbnails.")
-        return None
-
 # -------------------------
 # UPLOAD - CLEAR OLD FILES
 # -------------------------
@@ -174,14 +114,9 @@ async def upload_media(
         
         print(f"Saved: {save_path}")
         
-        # Convert HEIC/HEIF to JPG automatically
-        if save_path.lower().endswith(('.heic', '.heif')):
-            save_path = convert_heic_to_jpg(save_path)
-        
-        # Convert and generate thumbnail for videos
+        # Convert videos to H.264 (NO THUMBNAIL GENERATION)
         if save_path.lower().endswith(('.mp4', '.mov', '.m4v', '.avi', '.mkv')):
             save_path = convert_video_to_h264(save_path)
-            generate_video_thumbnail(save_path)
         
         # Use the final path after conversion
         saved_files.append(Path(save_path).name)
@@ -200,21 +135,12 @@ async def upload_media(
 # -------------------------
 # GENERATE CLIP
 # -------------------------
-
-from pathlib import Path
-import subprocess
-from fastapi import FastAPI
-
-ANALYZER_SCRIPT = Path("../ai/analyze.py")
 MAIN_AI_SCRIPT = Path("../ai/main.py")
-AI_VENV_PYTHON = Path("../ai/venv/bin/python3")  # <-- AI venv python
+AI_VENV_PYTHON = Path("../ai/venv/bin/python3")
 
 @app.post("/run_ai")
 async def run_ai():
-    """
-    Run the full AI pipeline (main.py) on the server using the AI venv
-    and stream output live to the console.
-    """
+    """Run the full AI pipeline"""
     try:
         print("✅ /run_ai endpoint triggered")
 
@@ -224,7 +150,7 @@ async def run_ai():
         # Start subprocess with live stdout/stderr streaming
         process = subprocess.Popen(
             [str(AI_VENV_PYTHON), str(MAIN_AI_SCRIPT)],
-            cwd=MAIN_AI_SCRIPT.parent,  # Run from AI folder
+            cwd=MAIN_AI_SCRIPT.parent,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True
@@ -232,7 +158,7 @@ async def run_ai():
 
         # Stream output line by line
         for line in process.stdout:
-            print(line, end="")  # live print to backend console
+            print(line, end="")
 
         process.wait()
         retcode = process.returncode
@@ -257,6 +183,7 @@ async def run_ai():
 
     except Exception as e:
         return {"success": False, "error": str(e)}
+
 # -------------------------
 # GET LATEST FINAL VIDEO
 # -------------------------
@@ -292,11 +219,11 @@ async def list_files():
     media_files = []
     song_files = []
     final_videos = []
-    image_ext = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
+    image_ext = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif']
     video_ext = ['.mp4', '.mov', '.m4v', '.avi', '.mkv']
 
     for item in Path("uploads/media").iterdir():
-        if item.is_file() and not item.name.endswith('_thumb.jpg'):
+        if item.is_file():
             ext = item.suffix.lower()
             file_type = "image" if ext in image_ext else "video"
             media_files.append({
@@ -314,7 +241,7 @@ async def list_files():
                 "url": f"/files/songs/{item.name}"
             })
     
-    # List final videos (sorted by modification time, newest first)
+    # List final videos
     for item in Path("uploads/final_videos").iterdir():
         if item.is_file() and item.suffix.lower() in video_ext:
             final_videos.append({
@@ -324,7 +251,6 @@ async def list_files():
                 "modified": item.stat().st_mtime
             })
     
-    # Sort by modification time (newest first)
     final_videos.sort(key=lambda x: x['modified'], reverse=True)
 
     return {
@@ -341,12 +267,12 @@ async def list_files():
 async def viewer():
     media_files = []
     song_files = []
-    image_ext = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
+    image_ext = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif']
     video_ext = ['.mp4', '.mov', '.m4v', '.avi', '.mkv']
 
-    # Get media files, excluding thumbnails
+    # Get media files
     for item in Path("uploads/media").iterdir():
-        if item.is_file() and not item.name.endswith('_thumb.jpg'):
+        if item.is_file():
             ext = item.suffix.lower()
             file_type = "image" if ext in image_ext else "video"
             media_files.append({
@@ -420,7 +346,6 @@ async def viewer():
         }}
     </style>
     <script>
-        // Handle image load errors
         function handleImageError(img) {{
             img.parentElement.innerHTML = '<div class="error-img">⚠️ Failed to load image<br><small>' + img.alt + '</small></div>';
         }}
