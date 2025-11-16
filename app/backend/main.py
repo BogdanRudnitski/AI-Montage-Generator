@@ -159,7 +159,13 @@ async def upload_single_file(files: List[UploadFile] = File(...)):
 @app.post("/upload-song")
 async def upload_song(
     song: UploadFile = File(...),
-    max_duration: str = Form("30")
+    max_duration: str = Form("30"),
+    density: str = Form("medium"),
+    aggressiveness: str = Form("0.7"),
+    focus_bass: str = Form("true"),
+    focus_vocals: str = Form("true"),
+    focus_repetitions: str = Form("true"),
+    sync_to_grid: str = Form("false")
 ):
     """Upload song and save options"""
     # Clear previous song
@@ -172,9 +178,20 @@ async def upload_song(
     
     print(f"Saved song: {song_path}")
     
-    # Save options.json with max_duration
+    # Parse boolean strings
+    def parse_bool(value: str) -> bool:
+        return value.lower() in ('true', '1', 'yes')
+    
+    # Save options.json with all parameters
     options_data = {
-        "max_duration": int(max_duration)
+        "max_duration": int(max_duration),
+        "density": density,
+        "aggressiveness": float(aggressiveness),
+        "focus_bass": parse_bool(focus_bass),
+        "focus_vocals": parse_bool(focus_vocals),
+        "focus_repetitions": parse_bool(focus_repetitions),
+        "sync_to_grid": parse_bool(sync_to_grid),
+        "song_filename": song.filename
     }
     options_path = "uploads/options.json"
     with open(options_path, "w") as f:
@@ -185,7 +202,7 @@ async def upload_song(
     return {
         "success": True,
         "song_saved": song.filename,
-        "max_duration": int(max_duration)
+        "options": options_data
     }
 
 # -------------------------
@@ -195,7 +212,13 @@ async def upload_song(
 async def upload_media(
     files: List[UploadFile] = File(...),
     song: Optional[UploadFile] = File(None),
-    max_duration: str = Form("30")
+    max_duration: str = Form("30"),
+    density: str = Form("medium"),
+    aggressiveness: str = Form("0.7"),
+    focus_bass: str = Form("true"),
+    focus_vocals: str = Form("true"),
+    focus_repetitions: str = Form("true"),
+    sync_to_grid: str = Form("false")
 ):
     # Clear previous uploads
     shutil.rmtree("uploads/media", ignore_errors=True)
@@ -240,10 +263,23 @@ async def upload_media(
         song_saved = sanitized_song_name
         print(f"Saved song: {song_path}")
 
-    # Save options.json with max_duration
+    # Parse boolean strings
+    def parse_bool(value: str) -> bool:
+        return value.lower() in ('true', '1', 'yes')
+
+    # Save options.json with all parameters
     options_data = {
-        "max_duration": int(max_duration)
+        "max_duration": int(max_duration),
+        "density": density,
+        "aggressiveness": float(aggressiveness),
+        "focus_bass": parse_bool(focus_bass),
+        "focus_vocals": parse_bool(focus_vocals),
+        "focus_repetitions": parse_bool(focus_repetitions),
+        "sync_to_grid": parse_bool(sync_to_grid),
     }
+    if song_saved:
+        options_data["song_filename"] = song_saved
+        
     options_path = "uploads/options.json"
     with open(options_path, "w") as f:
         json.dump(options_data, f, indent=2)
@@ -253,7 +289,7 @@ async def upload_media(
     return {
         "files_saved": saved_files, 
         "song_saved": song_saved,
-        "max_duration": int(max_duration)
+        "options": options_data
     }
 
 # -------------------------

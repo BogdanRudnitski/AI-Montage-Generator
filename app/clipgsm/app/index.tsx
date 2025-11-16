@@ -2,8 +2,11 @@ import React, { useState, useEffect } from "react";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Video, ResizeMode } from "expo-av";
-import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, StyleSheet, Dimensions } from "react-native";
+import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, StyleSheet, Dimensions, Switch } from "react-native";
 import { useRouter } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
+import Slider from '@react-native-community/slider';
+
 const { width } = Dimensions.get('window');
 
 interface MediaItem {
@@ -15,13 +18,22 @@ interface MediaItem {
 }
 
 export default function ExploreScreen() {
-  const router = useRouter(); // ADD THIS LINE
+  const router = useRouter();
   const [mediaList, setMediaList] = useState<MediaItem[]>([]);
   const [song, setSong] = useState<{ uri: string; name: string } | null>(null);
   const [songUploading, setSongUploading] = useState(false);
   const [songUploaded, setSongUploaded] = useState(false);
   const [generateLoading, setGenerateLoading] = useState(false);
   const [duration, setDuration] = useState<number>(30);
+  const [syncToGrid, setSyncToGrid] = useState(false);
+  
+  // Advanced options
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [focusBass, setFocusBass] = useState(true);
+  const [focusVocals, setFocusVocals] = useState(true);
+  const [focusRepetitions, setFocusRepetitions] = useState(true);
+  const [density, setDensity] = useState<'low' | 'medium' | 'high' | 'insane'>('medium');
+  const [aggressiveness, setAggressiveness] = useState(0.7);
 
   const SERVER_URL = "http://10.122.245.118:8000";
 
@@ -61,14 +73,12 @@ export default function ExploreScreen() {
     for (let i = 0; i < files.length; i++) {
       const actualIndex = startIdx + i;
       
-      // Mark current file as uploading
       setMediaList(prev => prev.map((item, idx) => 
         idx === actualIndex ? { ...item, uploading: true } : item
       ));
 
       const success = await uploadSingleFile(files[i], i);
 
-      // Mark as uploaded or failed
       setMediaList(prev => prev.map((item, idx) => 
         idx === actualIndex ? { ...item, uploading: false, uploaded: success } : item
       ));
@@ -103,16 +113,13 @@ export default function ExploreScreen() {
         uploaded: false,
       }));
 
-      // If adding more files, append. Otherwise replace.
       const shouldAppend = mediaList.length > 0;
       
       if (shouldAppend) {
-        const startIndex = mediaList.length; // Calculate BEFORE updating state
+        const startIndex = mediaList.length;
         setMediaList(prev => [...prev, ...newFiles]);
-        // Start uploading with the correct start index
         uploadMediaSequentially(newFiles, startIndex);
       } else {
-        // Clear uploads folder before starting fresh (first time only)
         try {
           await fetch(`${SERVER_URL}/clear-uploads`, {
             method: "POST",
@@ -121,7 +128,6 @@ export default function ExploreScreen() {
           console.error("Failed to clear uploads:", err);
         }
         setMediaList(newFiles);
-        // Start from index 0 for first batch
         uploadMediaSequentially(newFiles, 0);
       }
     }
@@ -137,6 +143,12 @@ export default function ExploreScreen() {
       type: "audio/mpeg",
     } as any);
     formData.append("max_duration", duration.toString());
+    formData.append("density", density);
+    formData.append("aggressiveness", aggressiveness.toString());
+    formData.append("focus_bass", focusBass.toString());
+    formData.append("focus_vocals", focusVocals.toString());
+    formData.append("focus_repetitions", focusRepetitions.toString());
+    formData.append("sync_to_grid", syncToGrid.toString()); // ← ADD THIS LINE
 
     try {
       setSongUploading(true);
@@ -180,24 +192,20 @@ export default function ExploreScreen() {
     }
   }
 
-  // Auto-upload song when selected or duration changes
+  // Auto-upload song when settings change
   useEffect(() => {
     if (song && !songUploading && !songUploaded) {
       uploadSongFile();
     }
-  }, [song, duration]);
+  }, [song, duration, density, aggressiveness, focusBass, focusVocals, focusRepetitions, syncToGrid]);
 
   async function generateVideo() {
     try {
-      // Navigate to loading screen immediately
       router.replace("/loading");
       
-      // Trigger AI generation
       const res = await fetch(`${SERVER_URL}/run_ai`, {
         method: "POST",
       });
-      
-      // Loading screen will poll and navigate automatically
     } catch (err) {
       console.error(err);
       Alert.alert("Generation Failed", "Check your network connection.");
@@ -226,7 +234,6 @@ export default function ExploreScreen() {
             />
           )}
           
-          {/* Upload overlay */}
           {(item.uploading || !item.uploaded) && (
             <View style={styles.uploadOverlay}>
               {item.uploading && (
@@ -243,7 +250,6 @@ export default function ExploreScreen() {
             </View>
           )}
           
-          {/* Success checkmark */}
           {item.uploaded && (
             <View style={styles.uploadedBadge}>
               <Text style={styles.uploadedText}>✓</Text>
@@ -266,9 +272,15 @@ export default function ExploreScreen() {
     );
   }
 
+  const densityLabels = {
+    low: { label: 'Low', desc: '~30 cuts', emoji: '🐌' },
+    medium: { label: 'Medium', desc: '~60 cuts', emoji: '🚶' },
+    high: { label: 'High', desc: '~90 cuts', emoji: '🏃' },
+    insane: { label: 'Insane', desc: '~150 cuts', emoji: '🚀' }
+  };
+
   return (
     <View style={styles.container}>
-      {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerBackground} />
         <Text style={styles.headerTitle}>Video Studio</Text>
@@ -423,7 +435,7 @@ export default function ExploreScreen() {
                 ]}
                 onPress={() => {
                   setDuration(sec);
-                  setSongUploaded(false); // Trigger re-upload with new duration
+                  setSongUploaded(false);
                 }}
                 activeOpacity={0.7}
               >
@@ -436,6 +448,204 @@ export default function ExploreScreen() {
               </TouchableOpacity>
             ))}
           </View>
+        </View>
+
+        {/* Advanced Options Section */}
+        <View style={styles.section}>
+          <TouchableOpacity
+            style={styles.advancedToggle}
+            onPress={() => setShowAdvanced(!showAdvanced)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.advancedToggleLeft}>
+              <Ionicons 
+                name="options-outline" 
+                size={22} 
+                color="#6366f1" 
+              />
+              <Text style={styles.advancedToggleText}>Advanced Options</Text>
+            </View>
+            <Ionicons 
+              name={showAdvanced ? "chevron-up" : "chevron-down"} 
+              size={24} 
+              color="#94a3b8" 
+            />
+          </TouchableOpacity>
+
+          {showAdvanced && (
+            <View style={styles.advancedContent}>
+              <Text style={styles.advancedDescription}>
+                Fine-tune how the AI analyzes your music and generates cuts
+              </Text>
+
+              {/* Density Selector */}
+              <View style={styles.densitySection}>
+                <View style={styles.densityHeader}>
+                  <Text style={styles.densityTitle}>✂️ Cut Density</Text>
+                  <View style={styles.densityBadge}>
+                    <Text style={styles.densityBadgeText}>
+                      {densityLabels[density].emoji} {densityLabels[density].label}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={styles.densityDescription}>
+                  {densityLabels[density].desc} for {duration}s video
+                </Text>
+                
+                <View style={styles.densityGrid}>
+                  {(Object.keys(densityLabels) as Array<keyof typeof densityLabels>).map((key) => (
+                    <TouchableOpacity
+                      key={key}
+                      style={[
+                        styles.densityOption,
+                        density === key && styles.densityOptionActive
+                      ]}
+                      onPress={() => {
+                        setDensity(key);
+                        setSongUploaded(false);
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[
+                        styles.densityEmoji,
+                        density === key && styles.densityEmojiActive
+                      ]}>
+                        {densityLabels[key].emoji}
+                      </Text>
+                      <Text style={[
+                        styles.densityLabel,
+                        density === key && styles.densityLabelActive
+                      ]}>
+                        {densityLabels[key].label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+
+              {/* Aggressiveness Slider */}
+              <View style={styles.sliderSection}>
+                <View style={styles.sliderHeader}>
+                  <Text style={styles.sliderTitle}>⚡ Aggressiveness</Text>
+                  <View style={styles.sliderValueBadge}>
+                    <Text style={styles.sliderValueText}>
+                      {Math.round(aggressiveness * 100)}%
+                    </Text>
+                  </View>
+                </View>
+                <Text style={styles.sliderDescription}>
+                  Higher = more cuts on subtle beats
+                </Text>
+                
+                <View style={styles.sliderContainer}>
+                  <Text style={styles.sliderMinLabel}>🐢 Chill</Text>
+                  <Slider
+                    style={styles.slider}
+                    minimumValue={0}
+                    maximumValue={1}
+                    step={0.1}
+                    value={aggressiveness}
+                    onValueChange={(value) => {
+                      setAggressiveness(value);
+                      setSongUploaded(false);
+                    }}
+                    minimumTrackTintColor="#6366f1"
+                    maximumTrackTintColor="#e2e8f0"
+                    thumbTintColor="#6366f1"
+                  />
+                  <Text style={styles.sliderMaxLabel}>🔥 Wild</Text>
+                </View>
+              </View>
+
+              {/* Focus Toggles */}
+              <View style={styles.focusSection}>
+                <Text style={styles.focusTitle}>🎯 Detection Focus</Text>
+                
+                <View style={styles.optionRow}>
+                  <View style={styles.optionLeft}>
+                    <Text style={styles.optionIcon}>🎢</Text>
+                    <View>
+                      <Text style={styles.optionTitle}>Bass Drops</Text>
+                      <Text style={styles.optionDescription}>Heavy bass & drops</Text>
+                    </View>
+                  </View>
+                  <Switch
+                    value={focusBass}
+                    onValueChange={(val) => {
+                      setFocusBass(val);
+                      setSongUploaded(false);
+                    }}
+                    trackColor={{ false: "#e2e8f0", true: "#93c5fd" }}
+                    thumbColor={focusBass ? "#6366f1" : "#cbd5e1"}
+                  />
+                </View>
+
+                <View style={styles.optionRow}>
+                  <View style={styles.optionLeft}>
+                    <Text style={styles.optionIcon}>🎤</Text>
+                    <View>
+                      <Text style={styles.optionTitle}>Vocal Hits</Text>
+                      <Text style={styles.optionDescription}>Consonants & syllables</Text>
+                    </View>
+                  </View>
+                  <Switch
+                    value={focusVocals}
+                    onValueChange={(val) => {
+                      setFocusVocals(val);
+                      setSongUploaded(false);
+                    }}
+                    trackColor={{ false: "#e2e8f0", true: "#93c5fd" }}
+                    thumbColor={focusVocals ? "#6366f1" : "#cbd5e1"}
+                  />
+                </View>
+
+                <View style={styles.optionRow}>
+                  <View style={styles.optionLeft}>
+                    <Text style={styles.optionIcon}>🔁</Text>
+                    <View>
+                      <Text style={styles.optionTitle}>Repetitions</Text>
+                      <Text style={styles.optionDescription}>Repeated words/sounds</Text>
+                    </View>
+                  </View>
+                  <Switch
+                    value={focusRepetitions}
+                    onValueChange={(val) => {
+                      setFocusRepetitions(val);
+                      setSongUploaded(false);
+                    }}
+                    trackColor={{ false: "#e2e8f0", true: "#93c5fd" }}
+                    thumbColor={focusRepetitions ? "#6366f1" : "#cbd5e1"}
+                  />
+                </View>
+              </View>
+
+              <View style={styles.optionRow}>
+                <View style={styles.optionLeft}>
+                  <Text style={styles.optionIcon}>🎯</Text>
+                  <View>
+                    <Text style={styles.optionTitle}>Sync to Beat Grid</Text>
+                    <Text style={styles.optionDescription}>Snap cuts to nearest beat</Text>
+                  </View>
+                </View>
+                <Switch
+                  value={syncToGrid}
+                  onValueChange={(val) => {
+                    setSyncToGrid(val);
+                    setSongUploaded(false);
+                  }}
+                  trackColor={{ false: "#e2e8f0", true: "#93c5fd" }}
+                  thumbColor={syncToGrid ? "#6366f1" : "#cbd5e1"}
+                />
+              </View>
+
+              <View style={styles.advancedHint}>
+                <Ionicons name="information-circle" size={16} color="#6366f1" />
+                <Text style={styles.advancedHintText}>
+                  Tip: Start with Medium density and 70% aggressiveness, then adjust to taste
+                </Text>
+              </View>
+            </View>
+          )}
         </View>
 
         {/* Generate Button */}
@@ -659,37 +869,6 @@ const styles = StyleSheet.create({
     height: 240,
     backgroundColor: "#e2e8f0",
   },
-  mediaOverlay: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: 80,
-    backgroundColor: 'rgba(0, 0, 0, 0.3)',
-  },
-  playIcon: {
-    position: 'absolute',
-    top: '50%',
-    left: '50%',
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: 'rgba(99, 102, 241, 0.95)',
-    justifyContent: "center",
-    alignItems: "center",
-    transform: [{ translateX: -28 }, { translateY: -28 }],
-    shadowColor: "#6366f1",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 10,
-    elevation: 5,
-  },
-  playIconText: {
-    color: "#fff",
-    fontSize: 22,
-    fontWeight: '700',
-    marginLeft: 4,
-  },
   uploadOverlay: {
     position: 'absolute',
     top: 0,
@@ -752,6 +931,28 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: "700",
     letterSpacing: 0.5,
+  },
+  deleteButton: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(239, 68, 68, 0.95)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: "#ef4444",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  deleteButtonText: {
+    color: '#fff',
+    fontSize: 20,
+    fontWeight: '700',
+    lineHeight: 22,
   },
   addMoreCard: {
     width: 170,
@@ -848,127 +1049,68 @@ const styles = StyleSheet.create({
     letterSpacing: -0.3,
   },
   audioSubtitle: {
-    fontSize: 13,
+    fontSize: 14,
     color: "#64748b",
     fontWeight: "600",
   },
   audioSubtitleSelected: {
-    fontSize: 13,
+    fontSize: 14,
     color: "rgba(255, 255, 255, 0.9)",
     fontWeight: "600",
   },
   chevronContainer: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#f1f5f9',
-    justifyContent: 'center',
-    alignItems: 'center',
+    marginLeft: 8,
   },
   chevron: {
-    fontSize: 28,
-    color: "#6366f1",
-    fontWeight: "500",
+    fontSize: 32,
+    color: "#cbd5e1",
+    fontWeight: "300",
   },
   changeButton: {
-    backgroundColor: "rgba(255, 255, 255, 0.2)",
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 14,
-    marginRight: 8,
+    backgroundColor: "rgba(255, 255, 255, 0.25)",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 12,
+    marginLeft: 8,
   },
   changeButtonText: {
     color: "#fff",
-    fontSize: 15,
-    fontWeight: "800",
-  },
-  generateButton: {
-    backgroundColor: '#06b6d4',
-    borderRadius: 16,
-    paddingVertical: 20,
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    shadowColor: "#06b6d4",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 5,
-  },
-  buttonIcon: {
-    fontSize: 24,
-    marginBottom: 6,
-  },
-  buttonText: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "800",
-    letterSpacing: -0.3,
-  },
-  buttonDisabled: {
-    backgroundColor: '#cbd5e1',
-    shadowColor: "#000",
-    shadowOpacity: 0.1,
-  },
-  deleteButton: {
-    position: "absolute",
-    top: 8,
-    right: 8,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: 'rgba(100, 116, 139, 0.85)',
-    justifyContent: "center",
-    alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.2,
-    shadowRadius: 3,
-    elevation: 2,
-    zIndex: 10,
-  },
-  deleteButtonText: {
-    color: "#fff",
-    fontSize: 20,
-    fontWeight: "400",
-    lineHeight: 20,
+    fontSize: 14,
+    fontWeight: "700",
   },
   deleteSongButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: "rgba(239, 68, 68, 0.9)",
     justifyContent: "center",
     alignItems: "center",
+    marginLeft: 8,
   },
   deleteSongText: {
     color: "#fff",
-    fontSize: 26,
-    fontWeight: "400",
+    fontSize: 24,
+    fontWeight: "700",
     lineHeight: 26,
   },
   durationRow: {
-    flexDirection: 'row',
-    gap: 10,
+    flexDirection: "row",
+    gap: 12,
   },
   durationButton: {
     flex: 1,
-    backgroundColor: '#fff',
-    borderRadius: 16,
+    backgroundColor: "#fff",
     paddingVertical: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#e2e8f0',
+    borderRadius: 16,
+    alignItems: "center",
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
+    shadowOpacity: 0.06,
     shadowRadius: 8,
     elevation: 2,
   },
   durationButtonActive: {
-    backgroundColor: '#6366f1',
-    borderColor: '#6366f1',
+    backgroundColor: "#6366f1",
     shadowColor: "#6366f1",
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
@@ -977,10 +1119,251 @@ const styles = StyleSheet.create({
   },
   durationText: {
     fontSize: 18,
-    fontWeight: '800',
-    color: '#64748b',
+    fontWeight: "800",
+    color: "#475569",
   },
   durationTextActive: {
-    color: '#fff',
+    color: "#fff",
+  },
+  advancedToggle: {
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 18,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  advancedToggleLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  advancedToggleText: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#0f172a",
+  },
+  advancedContent: {
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 20,
+    marginTop: 12,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  advancedDescription: {
+    fontSize: 14,
+    color: "#64748b",
+    fontWeight: "600",
+    marginBottom: 20,
+    lineHeight: 20,
+  },
+  densitySection: {
+    marginBottom: 24,
+    paddingBottom: 24,
+    borderBottomWidth: 1,
+    borderBottomColor: "#f1f5f9",
+  },
+  densityHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 6,
+  },
+  densityTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#0f172a",
+  },
+  densityBadge: {
+    backgroundColor: "#eef2ff",
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 10,
+  },
+  densityBadgeText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#6366f1",
+  },
+  densityDescription: {
+    fontSize: 13,
+    color: "#64748b",
+    fontWeight: "600",
+    marginBottom: 14,
+  },
+  densityGrid: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  densityOption: {
+    flex: 1,
+    backgroundColor: "#f8f9fa",
+    paddingVertical: 14,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    alignItems: "center",
+    borderWidth: 2,
+    borderColor: "transparent",
+  },
+  densityOptionActive: {
+    backgroundColor: "#eef2ff",
+    borderColor: "#6366f1",
+  },
+  densityEmoji: {
+    fontSize: 24,
+    marginBottom: 6,
+    opacity: 0.5,
+  },
+  densityEmojiActive: {
+    opacity: 1,
+  },
+  densityLabel: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#64748b",
+  },
+  densityLabelActive: {
+    color: "#6366f1",
+  },
+  sliderSection: {
+    marginBottom: 24,
+    paddingBottom: 24,
+    borderBottomWidth: 1,
+    borderBottomColor: "#f1f5f9",
+  },
+  sliderHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 6,
+  },
+  sliderTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#0f172a",
+  },
+  sliderValueBadge: {
+    backgroundColor: "#eef2ff",
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 10,
+    minWidth: 50,
+    alignItems: "center",
+  },
+  sliderValueText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#6366f1",
+  },
+  sliderDescription: {
+    fontSize: 13,
+    color: "#64748b",
+    fontWeight: "600",
+    marginBottom: 14,
+  },
+  sliderContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  slider: {
+    flex: 1,
+    height: 40,
+  },
+  sliderMinLabel: {
+    fontSize: 18,
+  },
+  sliderMaxLabel: {
+    fontSize: 18,
+  },
+  focusSection: {
+    marginBottom: 0,
+  },
+  focusTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#0f172a",
+    marginBottom: 12,
+  },
+  optionRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: "#f1f5f9",
+  },
+  optionLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    flex: 1,
+  },
+  optionIcon: {
+    fontSize: 28,
+  },
+  optionTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#0f172a",
+    marginBottom: 2,
+  },
+  optionDescription: {
+    fontSize: 13,
+    color: "#64748b",
+    fontWeight: "600",
+  },
+  advancedHint: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#eef2ff",
+    padding: 14,
+    borderRadius: 12,
+    marginTop: 16,
+  },
+  advancedHintText: {
+    fontSize: 12,
+    color: "#6366f1",
+    fontWeight: "600",
+    flex: 1,
+    lineHeight: 18,
+  },
+  generateButton: {
+    backgroundColor: "#6366f1",
+    paddingVertical: 20,
+    borderRadius: 18,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    shadowColor: "#6366f1",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  buttonDisabled: {
+    backgroundColor: "#cbd5e1",
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+  },
+  buttonIcon: {
+    fontSize: 24,
+  },
+  buttonText: {
+    fontSize: 19,
+    fontWeight: "900",
+    color: "#fff",
+    letterSpacing: -0.3,
   },
 });
