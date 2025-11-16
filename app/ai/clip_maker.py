@@ -2,6 +2,7 @@
 import json
 import os
 import random
+import re
 import librosa
 import soundfile as sf
 import subprocess
@@ -26,6 +27,37 @@ MAX_DURATION = int(os.environ.get('MAX_DURATION', '60'))
 # Beat types that should trigger clip changes
 BEAT_CHANGE_TYPES = {'bass_drop', 'vocal_change', 'downbeat'}
 
+def sanitize_filename(filename: str) -> str:
+    """Remove or replace problematic characters in filenames"""
+    # Keep the extension
+    name, ext = os.path.splitext(filename)
+    
+    # Make sure extension is lowercase and valid
+    ext = ext.lower()
+    
+    # Replace spaces and hyphens with underscores
+    name = name.replace(' ', '_')
+    name = name.replace('-', '_')
+    
+    # Remove or replace special characters, keep only alphanumeric and underscore
+    name = re.sub(r'[^\w]', '', name)
+    
+    # Remove multiple consecutive underscores
+    name = re.sub(r'_+', '_', name)
+    
+    # Remove leading/trailing underscores
+    name = name.strip('_')
+    
+    # Make sure we have a name
+    if not name:
+        name = "video"
+    
+    # Limit length
+    if len(name) > 100:
+        name = name[:100]
+    
+    return name + ext
+
 class ClipManager:
     """Manages video clips and tracks used segments to avoid repetition"""
     
@@ -45,7 +77,7 @@ class ClipManager:
         video_files = [f for f in os.listdir(self.clips_folder) 
                       if f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm'))]
         
-        print(f"📁 Scanning clips from '{self.clips_folder}'...")
+        print(f"🔍 Scanning clips from '{self.clips_folder}'...")
         for video_file in video_files:
             path = os.path.join(self.clips_folder, video_file)
             try:
@@ -408,12 +440,14 @@ def main():
         print(f"   Available files: {', '.join(audio_files)}\n")
         return
     
-    # Output filename
+    # SANITIZE OUTPUT FILENAME - THIS IS THE KEY FIX!
     video_filename = selected_song.rsplit('.', 1)[0] + '_final.mp4'
+    video_filename = sanitize_filename(video_filename)  # Clean the filename
     output_path = os.path.join(output_folder_abs, video_filename)
     
     print(f"\n🎵 Processing: {selected_song}")
     print(f"   Audio file: {os.path.basename(audio_path)}")
+    print(f"   Output file: {video_filename}")
     print(f"   BPM: {data.get('bpm', 0):.1f}")
     print(f"   Analyzed duration: {data.get('duration', 0):.2f}s")
     
@@ -443,6 +477,7 @@ def main():
     
     print("="*60)
     print(f"✅ Video created in '{OUTPUT_FOLDER}'!")
+    print(f"   Final filename: {video_filename}")
     print("="*60 + "\n")
 
 if __name__ == "__main__":

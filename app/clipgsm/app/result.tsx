@@ -9,7 +9,7 @@ import { Ionicons } from "@expo/vector-icons";
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
-const SERVER_URL = "http://192.168.68.109:8000";
+const SERVER_URL = "http://10.122.245.118:8000";
 
 export default function ResultScreen() {
   const router = useRouter();
@@ -21,16 +21,17 @@ export default function ResultScreen() {
   const [isDownloading, setIsDownloading] = useState(false);
   const videoRef = React.useRef<Video>(null);
 
-  // Get video URL from params - it's already URL-encoded from the backend
   const videoUrl = params.videoUrl as string;
   const videoName = params.videoName as string;
   
-  // Don't encode again! The backend already encoded it
-  const fullVideoUrl = `${SERVER_URL}${videoUrl}`;
+  // URL encode the path to handle spaces and special characters
+  const encodedVideoUrl = videoUrl ? encodeURI(videoUrl) : '';
+  const fullVideoUrl = `${SERVER_URL}${encodedVideoUrl}`;
 
   console.log("====== RESULT SCREEN DEBUG ======");
   console.log("Params received:", params);
   console.log("Video URL param:", videoUrl);
+  console.log("Encoded Video URL:", encodedVideoUrl);
   console.log("Video Name param:", videoName);
   console.log("Full Video URL:", fullVideoUrl);
   console.log("================================");
@@ -38,32 +39,31 @@ export default function ResultScreen() {
   // Pre-download video for instant save/share
   React.useEffect(() => {
     async function preDownloadVideo() {
-      if (downloadedFileUri || isDownloading || !fullVideoUrl) return;
+      if (downloadedFileUri || isDownloading) return;
       
       try {
         setIsDownloading(true);
         const timestamp = Date.now();
         const fileUri = `${FileSystem.documentDirectory}${timestamp}_${videoName}`;
         
-        console.log("Pre-downloading video from:", fullVideoUrl);
         console.log("Pre-downloading video to:", fileUri);
-        
         const downloadResult = await FileSystem.downloadAsync(fullVideoUrl, fileUri);
         
         if (downloadResult.uri) {
           setDownloadedFileUri(downloadResult.uri);
-          console.log("✓ Video pre-downloaded successfully:", downloadResult.uri);
+          console.log("✓ Video pre-downloaded successfully");
         }
       } catch (error) {
         console.error("Pre-download failed:", error);
-        console.error("Error details:", JSON.stringify(error, null, 2));
       } finally {
         setIsDownloading(false);
       }
     }
     
-    preDownloadVideo();
-  }, [fullVideoUrl, videoName]);
+    if (fullVideoUrl) {
+      preDownloadVideo();
+    }
+  }, [fullVideoUrl]);
 
   async function saveToGallery() {
     try {
@@ -84,11 +84,8 @@ export default function ResultScreen() {
         console.log("No pre-downloaded file, downloading now...");
         const timestamp = Date.now();
         fileUri = `${FileSystem.documentDirectory}${timestamp}_${videoName}`;
-        console.log("Downloading from:", fullVideoUrl);
-        console.log("Downloading to:", fileUri);
         const downloadResult = await FileSystem.downloadAsync(fullVideoUrl, fileUri);
         fileUri = downloadResult.uri;
-        console.log("Download complete:", fileUri);
       } else {
         console.log("Using pre-downloaded file:", fileUri);
       }
@@ -112,9 +109,8 @@ export default function ResultScreen() {
       }
 
       Alert.alert("✅ Saved!", "Video saved to your gallery.");
-    } catch (err: any) {
+    } catch (err) {
       console.error("Save error:", err);
-      console.error("Error details:", JSON.stringify(err, null, 2));
       Alert.alert("Save Failed", `Could not save video: ${err.message || 'Unknown error'}`);
     } finally {
       setSaving(false);
@@ -132,11 +128,8 @@ export default function ResultScreen() {
         console.log("No pre-downloaded file, downloading now...");
         const timestamp = Date.now();
         fileUri = `${FileSystem.documentDirectory}${timestamp}_${videoName}`;
-        console.log("Downloading from:", fullVideoUrl);
-        console.log("Downloading to:", fileUri);
         const downloadResult = await FileSystem.downloadAsync(fullVideoUrl, fileUri);
         fileUri = downloadResult.uri;
-        console.log("Download complete:", fileUri);
       } else {
         console.log("Using pre-downloaded file:", fileUri);
       }
@@ -158,9 +151,8 @@ export default function ResultScreen() {
         mimeType: "video/mp4",
         dialogTitle: "Share your video",
       });
-    } catch (err: any) {
+    } catch (err) {
       console.error("Share error:", err);
-      console.error("Error details:", JSON.stringify(err, null, 2));
       Alert.alert("Share Failed", `Could not share video: ${err.message || 'Unknown error'}`);
     } finally {
       setSharing(false);
@@ -168,7 +160,6 @@ export default function ResultScreen() {
   }
 
   function createNew() {
-    router.dismissAll();
     router.replace("/");
   }
 
@@ -218,9 +209,8 @@ export default function ResultScreen() {
             shouldPlay
             isLooping
             onError={(error) => {
-              console.error("Video playback error:", error);
-              console.error("Video URL:", fullVideoUrl);
-              Alert.alert("Video Error", "Could not load video. Check server connection and video URL.");
+              console.error("Video error:", error);
+              Alert.alert("Video Error", "Could not load video. Check server connection.");
             }}
             onLoad={(status) => {
               console.log("Video loaded successfully");
