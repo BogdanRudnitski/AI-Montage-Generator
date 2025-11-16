@@ -9,6 +9,7 @@ import re
 from typing import List, Optional
 from pathlib import Path
 import subprocess
+from urllib.parse import quote
 
 app = FastAPI()
 
@@ -297,9 +298,11 @@ async def run_ai():
             videos = [f for f in final_videos_path.iterdir() if f.is_file() and f.suffix.lower() == ".mp4"]
             if videos:
                 latest_video_file = max(videos, key=lambda x: x.stat().st_mtime)
+                # URL encode just the filename to handle spaces
+                encoded_filename = quote(latest_video_file.name)
                 latest_video = {
                     "name": latest_video_file.name,
-                    "url": f"/files/final_videos/{latest_video_file.name}",
+                    "url": f"/files/final_videos/{encoded_filename}",
                     "size": latest_video_file.stat().st_size
                 }
 
@@ -309,7 +312,7 @@ async def run_ai():
         return {"success": False, "error": str(e)}
 
 # -------------------------
-# GET LATEST FINAL VIDEO
+# GET LATEST FINAL VIDEO (FIXED)
 # -------------------------
 @app.get("/latest-video")
 async def get_latest_video():
@@ -327,16 +330,19 @@ async def get_latest_video():
     
     latest_video_file = max(videos, key=lambda x: x.stat().st_mtime)
     
+    # URL encode just the filename to handle spaces and special characters
+    encoded_filename = quote(latest_video_file.name)
+    
     return {
         "found": True,
         "name": latest_video_file.name,
-        "url": f"/files/final_videos/{latest_video_file.name}",
+        "url": f"/files/final_videos/{encoded_filename}",
         "size": latest_video_file.stat().st_size,
         "modified": latest_video_file.stat().st_mtime
     }
 
 # -------------------------
-# DOWNLOAD ENDPOINT (NEW)
+# DOWNLOAD ENDPOINT (FIXED)
 # -------------------------
 @app.get("/download/final_videos/{filename}")
 async def download_video(filename: str):
@@ -367,28 +373,31 @@ async def list_files():
         if item.is_file():
             ext = item.suffix.lower()
             file_type = "image" if ext in image_ext else "video"
+            encoded_filename = quote(item.name)
             media_files.append({
                 "name": item.name,
                 "size": item.stat().st_size,
                 "type": file_type,
-                "url": f"/files/media/{item.name}"
+                "url": f"/files/media/{encoded_filename}"
             })
 
     for item in Path("uploads/songs").iterdir():
         if item.is_file():
+            encoded_filename = quote(item.name)
             song_files.append({
                 "name": item.name,
                 "size": item.stat().st_size,
-                "url": f"/files/songs/{item.name}"
+                "url": f"/files/songs/{encoded_filename}"
             })
     
     # List final videos
     for item in Path("uploads/final_videos").iterdir():
         if item.is_file() and item.suffix.lower() in video_ext:
+            encoded_filename = quote(item.name)
             final_videos.append({
                 "name": item.name,
                 "size": item.stat().st_size,
-                "url": f"/files/final_videos/{item.name}",
+                "url": f"/files/final_videos/{encoded_filename}",
                 "modified": item.stat().st_mtime
             })
     
@@ -416,15 +425,17 @@ async def viewer():
         if item.is_file():
             ext = item.suffix.lower()
             file_type = "image" if ext in image_ext else "video"
+            encoded_filename = quote(item.name)
             media_files.append({
                 "name": item.name, 
                 "type": file_type, 
-                "url": f"/files/media/{item.name}"
+                "url": f"/files/media/{encoded_filename}"
             })
 
     for item in Path("uploads/songs").iterdir():
         if item.is_file():
-            song_files.append({"name": item.name, "url": f"/files/songs/{item.name}"})
+            encoded_filename = quote(item.name)
+            song_files.append({"name": item.name, "url": f"/files/songs/{encoded_filename}"})
 
     html = f"""
     <!DOCTYPE html>
