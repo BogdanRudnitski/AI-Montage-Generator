@@ -3,17 +3,18 @@ import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Video, ResizeMode } from "expo-av";
 import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, StyleSheet, Dimensions } from "react-native";
-
+import { useRouter } from "expo-router";
 const { width } = Dimensions.get('window');
 
 export default function ExploreScreen() {
+  const router = useRouter(); // ADD THIS LINE
   const [mediaList, setMediaList] = useState<any[]>([]);
   const [song, setSong] = useState<{ uri: string; name: string } | null>(null);
   const [uploadLoading, setUploadLoading] = useState(false);
   const [generateLoading, setGenerateLoading] = useState(false);
   const [duration, setDuration] = useState<number>(30);
 
-  const SERVER_URL = "http://10.122.28.116:8000";
+  const SERVER_URL = "http://192.168.68.109:8000";
 
   async function pickMedia() {
     const { granted } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -108,25 +109,19 @@ export default function ExploreScreen() {
 
   async function generateVideo() {
     try {
-      setGenerateLoading(true);
+      // Navigate to loading screen immediately
+      router.replace("/loading");
       
+      // Trigger AI generation
       const res = await fetch(`${SERVER_URL}/run_ai`, {
         method: "POST",
       });
-
-      if (!res.ok) {
-        return Alert.alert("Generation Failed", "Backend returned an error.");
-      }
       
-      const data = await res.json();
-      Alert.alert("🎉 Video Generated!", `Video saved at: ${data.video_path}`);
-    }
-    catch (err) {
+      // Loading screen will poll and navigate automatically
+    } catch (err) {
       console.error(err);
       Alert.alert("Generation Failed", "Check your network connection.");
-    }
-    finally {
-      setGenerateLoading(false);
+      router.replace("/");
     }
   }
 

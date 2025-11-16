@@ -1,10 +1,11 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 import os
 import shutil
 import json
+import re
 from typing import List, Optional
 from pathlib import Path
 import subprocess
@@ -29,6 +30,28 @@ os.makedirs("uploads/final_videos", exist_ok=True)
 app.mount("/files/media", StaticFiles(directory="uploads/media"), name="media")
 app.mount("/files/songs", StaticFiles(directory="uploads/songs"), name="songs")
 app.mount("/files/final_videos", StaticFiles(directory="uploads/final_videos"), name="final_videos")
+
+# -------------------------
+# FILENAME SANITIZATION
+# -------------------------
+def sanitize_filename(filename: str) -> str:
+    """Remove or replace problematic characters in filenames"""
+    # Keep the extension
+    name, ext = os.path.splitext(filename)
+    
+    # Replace spaces with underscores
+    name = name.replace(' ', '_')
+    
+    # Remove or replace special characters, keep only alphanumeric, underscore, hyphen, dot
+    name = re.sub(r'[^\w\-.]', '', name)
+    
+    # Remove multiple consecutive underscores
+    name = re.sub(r'_+', '_', name)
+    
+    # Remove leading/trailing underscores
+    name = name.strip('_')
+    
+    return name + ext
 
 # -------------------------
 # VIDEO CONVERSION (NO THUMBNAILS)
@@ -108,7 +131,12 @@ async def upload_media(
     saved_files = []
 
     for f in files:
-        save_path = f"uploads/media/{f.filename}"
+        # Sanitize the filename
+        sanitized_name = sanitize_filename(f.filename)
+        save_path = f"uploads/media/{sanitized_name}"
+        
+        print(f"Original filename: {f.filename}")
+        print(f"Sanitized filename: {sanitized_name}")
         
         # Save the uploaded file
         with open(save_path, "wb") as buffer:
@@ -125,10 +153,16 @@ async def upload_media(
 
     song_saved = None
     if song:
-        song_path = f"uploads/songs/{song.filename}"
+        # Sanitize song filename
+        sanitized_song_name = sanitize_filename(song.filename)
+        song_path = f"uploads/songs/{sanitized_song_name}"
+        
+        print(f"Original song filename: {song.filename}")
+        print(f"Sanitized song filename: {sanitized_song_name}")
+        
         with open(song_path, "wb") as buffer:
             shutil.copyfileobj(song.file, buffer)
-        song_saved = song.filename
+        song_saved = sanitized_song_name
         print(f"Saved song: {song_path}")
 
     # Save options.json with max_duration
@@ -225,6 +259,23 @@ async def get_latest_video():
         "size": latest_video_file.stat().st_size,
         "modified": latest_video_file.stat().st_mtime
     }
+
+# -------------------------
+# DOWNLOAD ENDPOINT (NEW)
+# -------------------------
+@app.get("/download/final_videos/{filename}")
+async def download_video(filename: str):
+    """Direct download endpoint for final videos"""
+    file_path = Path(f"uploads/final_videos/{filename}")
+    
+    if not file_path.exists():
+        return {"error": "File not found", "filename": filename}
+    
+    return FileResponse(
+        path=str(file_path),
+        media_type="video/mp4",
+        filename=filename
+    )
 
 # -------------------------
 # LIST FILES
