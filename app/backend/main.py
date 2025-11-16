@@ -91,7 +91,82 @@ def convert_video_to_h264(video_path: str) -> str:
         return video_path
 
 # -------------------------
-# UPLOAD - CLEAR OLD FILES
+# CLEAR UPLOADS FOLDER
+# -------------------------
+@app.post("/clear-uploads")
+async def clear_uploads():
+    """Clear all media files (not songs)"""
+    try:
+        shutil.rmtree("uploads/media", ignore_errors=True)
+        os.makedirs("uploads/media", exist_ok=True)
+        print("✓ Cleared uploads/media folder")
+        return {"success": True, "message": "Media folder cleared"}
+    except Exception as e:
+        print(f"Error clearing uploads: {e}")
+        return {"success": False, "error": str(e)}
+
+# -------------------------
+# UPLOAD SINGLE FILE
+# -------------------------
+@app.post("/upload-single")
+async def upload_single_file(files: List[UploadFile] = File(...)):
+    """Upload a single media file"""
+    saved_files = []
+    
+    for f in files:
+        save_path = f"uploads/media/{f.filename}"
+        
+        # Save the uploaded file
+        with open(save_path, "wb") as buffer:
+            shutil.copyfileobj(f.file, buffer)
+        
+        print(f"Saved: {save_path}")
+        
+        # Convert videos to H.264
+        if save_path.lower().endswith(('.mp4', '.mov', '.m4v', '.avi', '.mkv')):
+            save_path = convert_video_to_h264(save_path)
+        
+        saved_files.append(Path(save_path).name)
+    
+    return {"success": True, "files_saved": saved_files}
+
+# -------------------------
+# NEW: UPLOAD SONG + OPTIONS
+# -------------------------
+@app.post("/upload-song")
+async def upload_song(
+    song: UploadFile = File(...),
+    max_duration: str = Form("30")
+):
+    """Upload song and save options"""
+    # Clear previous song
+    shutil.rmtree("uploads/songs", ignore_errors=True)
+    os.makedirs("uploads/songs", exist_ok=True)
+    
+    song_path = f"uploads/songs/{song.filename}"
+    with open(song_path, "wb") as buffer:
+        shutil.copyfileobj(song.file, buffer)
+    
+    print(f"Saved song: {song_path}")
+    
+    # Save options.json with max_duration
+    options_data = {
+        "max_duration": int(max_duration)
+    }
+    options_path = "uploads/options.json"
+    with open(options_path, "w") as f:
+        json.dump(options_data, f, indent=2)
+    
+    print(f"Saved options: {options_data}")
+    
+    return {
+        "success": True,
+        "song_saved": song.filename,
+        "max_duration": int(max_duration)
+    }
+
+# -------------------------
+# OLD UPLOAD ENDPOINT (KEPT FOR COMPATIBILITY)
 # -------------------------
 @app.post("/upload")
 async def upload_media(
