@@ -19,7 +19,6 @@ interface MediaItem {
 
 export default function ExploreScreen() {
   const router = useRouter();
-  const router = useRouter();
   const [mediaList, setMediaList] = useState<MediaItem[]>([]);
   const [song, setSong] = useState<{ uri: string; name: string } | null>(null);
   const [songUploading, setSongUploading] = useState(false);
@@ -127,7 +126,6 @@ export default function ExploreScreen() {
       const shouldAppend = mediaList.length > 0;
       
       if (shouldAppend) {
-        const startIndex = mediaList.length;
         const startIndex = mediaList.length;
         setMediaList(prev => [...prev, ...newFiles]);
         // Upload in parallel
