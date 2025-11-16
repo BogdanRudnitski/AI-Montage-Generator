@@ -52,4 +52,4 @@ node_modules/
 
 expo-env.d.ts
 
-audio_analysis.json
+app/ai/audio_analysis.json
