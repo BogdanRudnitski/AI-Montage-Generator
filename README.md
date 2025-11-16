@@ -1,5 +1,17 @@
-# codejam15
+# FOR FIRST SETUP ONLY
 
+cd app/backend
+python3 -m venv venv
+
+cd ../ai
+python3 -m venv venv
+
+
+# AFTER EVERY GIT PULL
+
+# from source of project, i.e. from codejam15
+
+cd app/clipgsm
 npm install
 
 # from source of project, i.e. from codejam15
