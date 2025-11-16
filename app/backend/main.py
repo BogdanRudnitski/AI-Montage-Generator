@@ -54,63 +54,138 @@ def sanitize_filename(filename: str) -> str:
     return name + ext
 
 # -------------------------
-# VIDEO CONVERSION (NO THUMBNAILS)
+# VIDEO COMPRESSION & CONVERSION
 # -------------------------
-def convert_video_to_h264(video_path: str) -> str:
-    """Convert video to H.264 for better browser compatibility"""
+def get_video_size_mb(video_path: str) -> float:
+    """Get video file size in MB"""
     try:
-        # Check if video is already H.264
+        size_bytes = os.path.getsize(video_path)
+        return size_bytes / (1024 * 1024)
+    except:
+        return 0
+
+def get_video_info(video_path: str) -> dict:
+    """Get video codec, resolution, and duration"""
+    try:
         probe = subprocess.run([
             'ffprobe',
             '-v', 'error',
             '-select_streams', 'v:0',
-            '-show_entries', 'stream=codec_name',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
+            '-show_entries', 'stream=codec_name,width,height',
+            '-show_entries', 'format=duration',
+            '-of', 'json',
             video_path
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, check=True)
         
-        codec = probe.stdout.strip()
-        print(f"Video codec: {codec}")
+        info = json.loads(probe.stdout)
+        codec = info['streams'][0]['codec_name'] if 'streams' in info and info['streams'] else 'unknown'
+        width = info['streams'][0].get('width', 0) if 'streams' in info and info['streams'] else 0
+        height = info['streams'][0].get('height', 0) if 'streams' in info and info['streams'] else 0
+        duration = float(info['format'].get('duration', 0)) if 'format' in info else 0
         
-        # If already H.264, no conversion needed
-        if codec == 'h264':
-            print(f"✓ Video already H.264: {video_path}")
+        return {
+            'codec': codec,
+            'width': width,
+            'height': height,
+            'duration': duration
+        }
+    except:
+        return {'codec': 'unknown', 'width': 0, 'height': 0, 'duration': 0}
+
+def compress_video(video_path: str) -> str:
+    """Compress video based on size with aggressive settings for large files"""
+    try:
+        size_mb = get_video_size_mb(video_path)
+        video_info = get_video_info(video_path)
+        
+        print(f"Video: {video_path}")
+        print(f"  Size: {size_mb:.1f} MB")
+        print(f"  Codec: {video_info['codec']}")
+        print(f"  Resolution: {video_info['width']}x{video_info['height']}")
+        print(f"  Duration: {video_info['duration']:.1f}s")
+        
+        # Determine if compression is needed
+        needs_compression = False
+        crf = 23  # Default quality (lower = better, 18-28 is reasonable range)
+        max_width = 1920  # Default max resolution
+        
+        if size_mb > 100:
+            # Very large files: aggressive compression
+            needs_compression = True
+            crf = 28
+            max_width = 1280
+            print(f"  → Large file detected, using aggressive compression (CRF={crf}, max_width={max_width})")
+        elif size_mb > 50:
+            # Large files: moderate compression
+            needs_compression = True
+            crf = 26
+            max_width = 1920
+            print(f"  → Medium file detected, using moderate compression (CRF={crf})")
+        elif size_mb > 20:
+            # Medium files: light compression
+            needs_compression = True
+            crf = 24
+            print(f"  → Using light compression (CRF={crf})")
+        elif video_info['codec'] != 'h264':
+            # Small files but wrong codec
+            needs_compression = True
+            crf = 23
+            print(f"  → Converting codec to H.264")
+        else:
+            print(f"  → No compression needed (already H.264, size OK)")
             return video_path
         
-        # Convert to H.264
-        print(f"Converting {codec} to H.264: {video_path}")
-        output_path = video_path.rsplit('.', 1)[0] + '_converted.mp4'
+        # Build ffmpeg command
+        output_path = video_path.rsplit('.', 1)[0] + '_compressed.mp4'
         
-        subprocess.run([
+        # Scale filter if resolution is too high
+        scale_filter = []
+        if video_info['width'] > max_width:
+            scale_filter = ['-vf', f'scale={max_width}:-2']
+            print(f"  → Downscaling to max width {max_width}px")
+        
+        cmd = [
             'ffmpeg',
             '-i', video_path,
             '-c:v', 'libx264',
             '-preset', 'medium',
-            '-crf', '23',
+            '-crf', str(crf),
             '-c:a', 'aac',
             '-b:a', '128k',
             '-movflags', '+faststart',
-            '-y',
-            output_path
-        ], check=True, capture_output=True)
+            '-y'
+        ]
         
-        print(f"✓ Converted to H.264: {output_path}")
+        if scale_filter:
+            cmd.extend(scale_filter)
         
-        # Remove original and rename converted file
+        cmd.append(output_path)
+        
+        # Run compression
+        subprocess.run(cmd, check=True, capture_output=True, stderr=subprocess.PIPE)
+        
+        # Check compression results
         if os.path.exists(output_path):
+            new_size_mb = get_video_size_mb(output_path)
+            compression_ratio = (1 - new_size_mb / size_mb) * 100 if size_mb > 0 else 0
+            
+            print(f"  ✓ Compressed: {size_mb:.1f} MB → {new_size_mb:.1f} MB ({compression_ratio:.1f}% reduction)")
+            
+            # Replace original with compressed version
             os.remove(video_path)
             final_path = video_path.rsplit('.', 1)[0] + '.mp4'
             os.rename(output_path, final_path)
-            print(f"✓ Replaced with: {final_path}")
+            
             return final_path
-        
-        return video_path
+        else:
+            print(f"  ✗ Compression failed, keeping original")
+            return video_path
         
     except FileNotFoundError:
-        print("Warning: ffmpeg/ffprobe not found. Install to enable video conversion.")
+        print("Warning: ffmpeg/ffprobe not found. Install to enable video compression.")
         return video_path
     except Exception as e:
-        print(f"Warning: Could not convert video {video_path}: {e}")
+        print(f"Warning: Could not compress video {video_path}: {e}")
         return video_path
 
 # -------------------------
@@ -133,7 +208,7 @@ async def clear_uploads():
 # -------------------------
 @app.post("/upload-single")
 async def upload_single_file(files: List[UploadFile] = File(...)):
-    """Upload a single media file"""
+    """Upload a single media file with compression"""
     saved_files = []
     
     for f in files:
@@ -145,23 +220,23 @@ async def upload_single_file(files: List[UploadFile] = File(...)):
         
         print(f"Saved: {save_path}")
         
-        # Convert videos to H.264
+        # Compress videos (handles both compression and H.264 conversion)
         if save_path.lower().endswith(('.mp4', '.mov', '.m4v', '.avi', '.mkv')):
-            save_path = convert_video_to_h264(save_path)
+            save_path = compress_video(save_path)
         
         saved_files.append(Path(save_path).name)
     
     return {"success": True, "files_saved": saved_files}
 
 # -------------------------
-# NEW: UPLOAD SONG + OPTIONS
+# UPLOAD SONG (NO COMPRESSION)
 # -------------------------
 @app.post("/upload-song")
 async def upload_song(
     song: UploadFile = File(...),
     max_duration: str = Form("30")
 ):
-    """Upload song and save options"""
+    """Upload song without compression"""
     # Clear previous song
     shutil.rmtree("uploads/songs", ignore_errors=True)
     os.makedirs("uploads/songs", exist_ok=True)
@@ -170,7 +245,7 @@ async def upload_song(
     with open(song_path, "wb") as buffer:
         shutil.copyfileobj(song.file, buffer)
     
-    print(f"Saved song: {song_path}")
+    print(f"Saved song: {song_path} (no compression)")
     
     # Save options.json with max_duration
     options_data = {
@@ -219,16 +294,15 @@ async def upload_media(
         
         print(f"Saved: {save_path}")
         
-        # Convert videos to H.264 (NO THUMBNAIL GENERATION)
+        # Compress videos
         if save_path.lower().endswith(('.mp4', '.mov', '.m4v', '.avi', '.mkv')):
-            save_path = convert_video_to_h264(save_path)
+            save_path = compress_video(save_path)
         
-        # Use the final path after conversion
         saved_files.append(Path(save_path).name)
 
     song_saved = None
     if song:
-        # Sanitize song filename
+        # Sanitize song filename (NO COMPRESSION FOR SONGS)
         sanitized_song_name = sanitize_filename(song.filename)
         song_path = f"uploads/songs/{sanitized_song_name}"
         
@@ -238,7 +312,7 @@ async def upload_media(
         with open(song_path, "wb") as buffer:
             shutil.copyfileobj(song.file, buffer)
         song_saved = sanitized_song_name
-        print(f"Saved song: {song_path}")
+        print(f"Saved song: {song_path} (no compression)")
 
     # Save options.json with max_duration
     options_data = {
@@ -336,7 +410,7 @@ async def get_latest_video():
     }
 
 # -------------------------
-# DOWNLOAD ENDPOINT (NEW)
+# DOWNLOAD ENDPOINT
 # -------------------------
 @app.get("/download/final_videos/{filename}")
 async def download_video(filename: str):

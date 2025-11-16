@@ -15,7 +15,7 @@ interface MediaItem {
 }
 
 export default function ExploreScreen() {
-  const router = useRouter(); // ADD THIS LINE
+  const router = useRouter();
   const [mediaList, setMediaList] = useState<MediaItem[]>([]);
   const [song, setSong] = useState<{ uri: string; name: string } | null>(null);
   const [songUploading, setSongUploading] = useState(false);
@@ -57,27 +57,35 @@ export default function ExploreScreen() {
     }
   }
 
-  async function uploadMediaSequentially(files: MediaItem[], startIdx: number) {
-    for (let i = 0; i < files.length; i++) {
+  async function uploadMediaInParallel(files: MediaItem[], startIdx: number) {
+    // Mark all files as uploading
+    setMediaList(prev => prev.map((item, idx) => 
+      idx >= startIdx && idx < startIdx + files.length 
+        ? { ...item, uploading: true } 
+        : item
+    ));
+
+    // Upload all files in parallel
+    const uploadPromises = files.map(async (file, i) => {
       const actualIndex = startIdx + i;
+      const success = await uploadSingleFile(file, i);
       
-      // Mark current file as uploading
+      // Update individual file status
       setMediaList(prev => prev.map((item, idx) => 
-        idx === actualIndex ? { ...item, uploading: true } : item
-      ));
-
-      const success = await uploadSingleFile(files[i], i);
-
-      // Mark as uploaded or failed
-      setMediaList(prev => prev.map((item, idx) => 
-        idx === actualIndex ? { ...item, uploading: false, uploaded: success } : item
+        idx === actualIndex 
+          ? { ...item, uploading: false, uploaded: success } 
+          : item
       ));
 
       if (!success) {
-        Alert.alert("Upload Failed", `Failed to upload ${files[i].filename}`);
-        break;
+        Alert.alert("Upload Failed", `Failed to upload ${file.filename}`);
       }
-    }
+
+      return { success, index: actualIndex };
+    });
+
+    // Wait for all uploads to complete
+    await Promise.all(uploadPromises);
   }
 
   async function pickMedia() {
@@ -107,10 +115,10 @@ export default function ExploreScreen() {
       const shouldAppend = mediaList.length > 0;
       
       if (shouldAppend) {
-        const startIndex = mediaList.length; // Calculate BEFORE updating state
+        const startIndex = mediaList.length;
         setMediaList(prev => [...prev, ...newFiles]);
-        // Start uploading with the correct start index
-        uploadMediaSequentially(newFiles, startIndex);
+        // Upload in parallel
+        uploadMediaInParallel(newFiles, startIndex);
       } else {
         // Clear uploads folder before starting fresh (first time only)
         try {
@@ -121,8 +129,8 @@ export default function ExploreScreen() {
           console.error("Failed to clear uploads:", err);
         }
         setMediaList(newFiles);
-        // Start from index 0 for first batch
-        uploadMediaSequentially(newFiles, 0);
+        // Upload in parallel
+        uploadMediaInParallel(newFiles, 0);
       }
     }
   }
@@ -310,7 +318,7 @@ export default function ExploreScreen() {
               <Text style={styles.emptyTitle}>Add Your Media</Text>
               <Text style={styles.emptySubtitle}>Tap to select photos and videos</Text>
               <View style={styles.emptyHint}>
-                <Text style={styles.emptyHintText}>Auto-uploads on select</Text>
+                <Text style={styles.emptyHintText}>Uploads in parallel</Text>
               </View>
             </TouchableOpacity>
           ) : (
@@ -423,7 +431,7 @@ export default function ExploreScreen() {
                 ]}
                 onPress={() => {
                   setDuration(sec);
-                  setSongUploaded(false); // Trigger re-upload with new duration
+                  setSongUploaded(false);
                 }}
                 activeOpacity={0.7}
               >
