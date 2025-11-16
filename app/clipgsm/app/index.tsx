@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Video, ResizeMode } from "expo-av";
@@ -6,15 +6,79 @@ import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicat
 import { useRouter } from "expo-router";
 const { width } = Dimensions.get('window');
 
+interface MediaItem {
+  uri: string;
+  filename?: string;
+  type: "image" | "video";
+  uploading?: boolean;
+  uploaded?: boolean;
+}
+
 export default function ExploreScreen() {
   const router = useRouter(); // ADD THIS LINE
-  const [mediaList, setMediaList] = useState<any[]>([]);
+  const [mediaList, setMediaList] = useState<MediaItem[]>([]);
   const [song, setSong] = useState<{ uri: string; name: string } | null>(null);
-  const [uploadLoading, setUploadLoading] = useState(false);
+  const [songUploading, setSongUploading] = useState(false);
+  const [songUploaded, setSongUploaded] = useState(false);
   const [generateLoading, setGenerateLoading] = useState(false);
   const [duration, setDuration] = useState<number>(30);
 
-  const SERVER_URL = "http://192.168.68.109:8000";
+  const SERVER_URL = "http://172.20.10.4:8000";
+
+  // Check if all media and song are uploaded
+  const allUploaded = mediaList.length > 0 && 
+                      mediaList.every(m => m.uploaded) && 
+                      song !== null && 
+                      songUploaded;
+
+  async function uploadSingleFile(file: MediaItem, index: number) {
+    const formData = new FormData();
+    
+    formData.append("files", {
+      uri: file.uri,
+      name: file.filename || `file_${index}.${file.type === "video" ? "mp4" : "jpg"}`,
+      type: file.type === "video" ? "video/mp4" : "image/jpeg",
+    } as any);
+
+    try {
+      const res = await fetch(`${SERVER_URL}/upload-single`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        throw new Error("Upload failed");
+      }
+
+      return true;
+    } catch (err) {
+      console.error("Upload error:", err);
+      return false;
+    }
+  }
+
+  async function uploadMediaSequentially(files: MediaItem[], startIdx: number) {
+    for (let i = 0; i < files.length; i++) {
+      const actualIndex = startIdx + i;
+      
+      // Mark current file as uploading
+      setMediaList(prev => prev.map((item, idx) => 
+        idx === actualIndex ? { ...item, uploading: true } : item
+      ));
+
+      const success = await uploadSingleFile(files[i], i);
+
+      // Mark as uploaded or failed
+      setMediaList(prev => prev.map((item, idx) => 
+        idx === actualIndex ? { ...item, uploading: false, uploaded: success } : item
+      ));
+
+      if (!success) {
+        Alert.alert("Upload Failed", `Failed to upload ${files[i].filename}`);
+        break;
+      }
+    }
+  }
 
   async function pickMedia() {
     const { granted } = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -31,7 +95,67 @@ export default function ExploreScreen() {
     });
 
     if (!result.canceled) {
-      setMediaList(result.assets);
+      const newFiles = result.assets.map((asset, index) => ({
+        uri: asset.uri,
+        filename: asset.fileName || `file_${index}.${asset.type === "video" ? "mp4" : "jpg"}`,
+        type: asset.type as "image" | "video",
+        uploading: false,
+        uploaded: false,
+      }));
+
+      // If adding more files, append. Otherwise replace.
+      const shouldAppend = mediaList.length > 0;
+      
+      if (shouldAppend) {
+        const startIndex = mediaList.length; // Calculate BEFORE updating state
+        setMediaList(prev => [...prev, ...newFiles]);
+        // Start uploading with the correct start index
+        uploadMediaSequentially(newFiles, startIndex);
+      } else {
+        // Clear uploads folder before starting fresh (first time only)
+        try {
+          await fetch(`${SERVER_URL}/clear-uploads`, {
+            method: "POST",
+          });
+        } catch (err) {
+          console.error("Failed to clear uploads:", err);
+        }
+        setMediaList(newFiles);
+        // Start from index 0 for first batch
+        uploadMediaSequentially(newFiles, 0);
+      }
+    }
+  }
+
+  async function uploadSongFile() {
+    if (!song) return;
+
+    const formData = new FormData();
+    formData.append("song", {
+      uri: song.uri,
+      name: song.name,
+      type: "audio/mpeg",
+    } as any);
+    formData.append("max_duration", duration.toString());
+
+    try {
+      setSongUploading(true);
+      const res = await fetch(`${SERVER_URL}/upload-song`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        throw new Error("Song upload failed");
+      }
+
+      setSongUploaded(true);
+    } catch (err) {
+      console.error(err);
+      Alert.alert("Upload Failed", "Could not upload song.");
+      setSongUploaded(false);
+    } finally {
+      setSongUploading(false);
     }
   }
 
@@ -48,6 +172,7 @@ export default function ExploreScreen() {
           uri: asset.uri,
           name: asset.name || "song.mp3",
         });
+        setSongUploaded(false);
       }
     } catch (err) {
       console.error("Song picker error:", err);
@@ -55,57 +180,12 @@ export default function ExploreScreen() {
     }
   }
 
-  async function uploadToBackend() {
-    if (!song || !song.uri) {
-      return Alert.alert("Song Required", "Please select a song before uploading.");
+  // Auto-upload song when selected or duration changes
+  useEffect(() => {
+    if (song && !songUploading && !songUploaded) {
+      uploadSongFile();
     }
-
-    if (mediaList.length === 0) {
-      return Alert.alert("No Media", "Select some images or videos to create your project.");
-    }
-
-    const formData = new FormData();
-
-    mediaList.forEach((item, index) => {
-      formData.append("files", {
-        uri: item.uri,
-        name: item.filename || `file_${index}.${item.type === "video" ? "mp4" : "jpg"}`,
-        type: item.type === "video" ? "video/mp4" : "image/jpeg",
-      } as any);
-    });
-
-    formData.append("song", {
-      uri: song.uri,
-      name: song.name,
-      type: "audio/mpeg",
-    } as any);
-
-    formData.append("max_duration", duration.toString());
-
-    try {
-      setUploadLoading(true);
-
-      const res = await fetch(`${SERVER_URL}/upload`, {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!res.ok) {
-        return Alert.alert("Upload Failed", "Backend returned an error.");
-      }
-
-      const data = await res.json();
-      Alert.alert(
-        "✨ Success!",
-        `Uploaded ${data.files_saved.length} media files and song: ${data.song_saved}`
-      );
-    } catch (err) {
-      console.error(err);
-      Alert.alert("Upload Failed", "Check your network connection.");
-    } finally {
-      setUploadLoading(false);
-    }
-  }
+  }, [song, duration]);
 
   async function generateVideo() {
     try {
@@ -130,7 +210,7 @@ export default function ExploreScreen() {
     setMediaList(newMediaList);
   }
 
-  function renderMediaItem(item: any, index: number) {
+  function renderMediaItem(item: MediaItem, index: number) {
     return (
       <View key={index} style={styles.mediaCard}>
         <View style={styles.mediaContent}>
@@ -138,19 +218,37 @@ export default function ExploreScreen() {
             <Image source={{ uri: item.uri }} style={styles.mediaThumbnail} />
           )}
           {item.type === "video" && (
-            <>
-              <Video
-                source={{ uri: item.uri }}
-                useNativeControls={false}
-                resizeMode={ResizeMode.COVER}
-                style={styles.mediaThumbnail}
-              />
-              <View style={styles.playIcon}>
-                <Text style={styles.playIconText}>▶</Text>
-              </View>
-            </>
+            <Video
+              source={{ uri: item.uri }}
+              useNativeControls={false}
+              resizeMode={ResizeMode.COVER}
+              style={styles.mediaThumbnail}
+            />
           )}
-          <View style={styles.mediaOverlay} />
+          
+          {/* Upload overlay */}
+          {(item.uploading || !item.uploaded) && (
+            <View style={styles.uploadOverlay}>
+              {item.uploading && (
+                <>
+                  <ActivityIndicator size="large" color="#fff" />
+                  <Text style={styles.uploadingText}>Uploading...</Text>
+                </>
+              )}
+              {!item.uploading && !item.uploaded && (
+                <View style={styles.queuedIndicator}>
+                  <Text style={styles.queuedText}>⏳</Text>
+                </View>
+              )}
+            </View>
+          )}
+          
+          {/* Success checkmark */}
+          {item.uploaded && (
+            <View style={styles.uploadedBadge}>
+              <Text style={styles.uploadedText}>✓</Text>
+            </View>
+          )}
         </View>
         <View style={styles.mediaTypeTag}>
           <Text style={styles.mediaTypeText}>
@@ -212,7 +310,7 @@ export default function ExploreScreen() {
               <Text style={styles.emptyTitle}>Add Your Media</Text>
               <Text style={styles.emptySubtitle}>Tap to select photos and videos</Text>
               <View style={styles.emptyHint}>
-                <Text style={styles.emptyHintText}>Up to unlimited files</Text>
+                <Text style={styles.emptyHintText}>Auto-uploads on select</Text>
               </View>
             </TouchableOpacity>
           ) : (
@@ -266,19 +364,33 @@ export default function ExploreScreen() {
               </View>
             </TouchableOpacity>
           ) : (
-            <View style={styles.audioCardSelected}>
+            <View style={[
+              styles.audioCardSelected,
+              songUploading && styles.audioCardUploading
+            ]}>
               <View style={styles.audioIconContainerSelected}>
-                <Text style={styles.audioIcon}>🎵</Text>
+                {songUploading ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : songUploaded ? (
+                  <Text style={styles.audioIcon}>✓</Text>
+                ) : (
+                  <Text style={styles.audioIcon}>🎵</Text>
+                )}
               </View>
               <View style={styles.audioTextContainer}>
                 <Text style={styles.audioTitleSelected} numberOfLines={1}>{song.name}</Text>
-                <Text style={styles.audioSubtitleSelected}>Ready to create</Text>
+                <Text style={styles.audioSubtitleSelected}>
+                  {songUploading ? "Uploading..." : songUploaded ? "Ready to create" : "Waiting..."}
+                </Text>
               </View>
               <TouchableOpacity onPress={pickSong} style={styles.changeButton}>
                 <Text style={styles.changeButtonText}>Change</Text>
               </TouchableOpacity>
               <TouchableOpacity 
-                onPress={() => setSong(null)} 
+                onPress={() => {
+                  setSong(null);
+                  setSongUploaded(false);
+                }} 
                 style={styles.deleteSongButton}
               >
                 <Text style={styles.deleteSongText}>×</Text>
@@ -309,7 +421,10 @@ export default function ExploreScreen() {
                   styles.durationButton,
                   duration === sec && styles.durationButtonActive
                 ]}
-                onPress={() => setDuration(sec)}
+                onPress={() => {
+                  setDuration(sec);
+                  setSongUploaded(false); // Trigger re-upload with new duration
+                }}
                 activeOpacity={0.7}
               >
                 <Text style={[
@@ -323,47 +438,28 @@ export default function ExploreScreen() {
           </View>
         </View>
 
-        {/* Action Buttons */}
+        {/* Generate Button */}
         <View style={styles.section}>
-          <View style={styles.buttonRow}>
-            <TouchableOpacity 
-              style={[
-                styles.uploadButton, 
-                (!song || mediaList.length === 0) && styles.buttonDisabled
-              ]}
-              onPress={uploadToBackend}
-              activeOpacity={0.8}
-              disabled={uploadLoading || generateLoading || !song || mediaList.length === 0}
-            >
-              {uploadLoading ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <>
-                  <Text style={styles.buttonIcon}>🚀</Text>
-                  <Text style={styles.buttonText}>Upload</Text>
-                </>
-              )}
-            </TouchableOpacity>
-
-            <TouchableOpacity 
-              style={[
-                styles.generateButton, 
-                (!song || mediaList.length === 0) && styles.buttonDisabled
-              ]}
-              onPress={generateVideo}
-              activeOpacity={0.8}
-              disabled={uploadLoading || generateLoading || !song || mediaList.length === 0}
-            >
-              {generateLoading ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <>
-                  <Text style={styles.buttonIcon}>✨</Text>
-                  <Text style={styles.buttonText}>Generate</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
+          <TouchableOpacity 
+            style={[
+              styles.generateButton, 
+              !allUploaded && styles.buttonDisabled
+            ]}
+            onPress={generateVideo}
+            activeOpacity={0.8}
+            disabled={generateLoading || !allUploaded}
+          >
+            {generateLoading ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <>
+                <Text style={styles.buttonIcon}>✨</Text>
+                <Text style={styles.buttonText}>
+                  {allUploaded ? "Generate Video" : "Upload files first"}
+                </Text>
+              </>
+            )}
+          </TouchableOpacity>
         </View>
 
         <View style={{ height: 40 }} />
@@ -594,20 +690,68 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     marginLeft: 4,
   },
+  uploadOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  uploadingText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 12,
+  },
+  queuedIndicator: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  queuedText: {
+    fontSize: 32,
+  },
+  uploadedBadge: {
+    position: 'absolute',
+    bottom: 8,
+    left: 8,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(16, 185, 129, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: "#10b981",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  uploadedText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
   mediaTypeTag: {
     position: "absolute",
-    top: 12,
-    right: 12,
-    backgroundColor: "rgba(15, 23, 42, 0.85)",
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
+    bottom: 8,
+    right: 8,
+    backgroundColor: "rgba(15, 23, 42, 0.75)",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
   },
   mediaTypeText: {
     color: "#fff",
-    fontSize: 11,
-    fontWeight: "800",
-    letterSpacing: 1,
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.5,
   },
   addMoreCard: {
     width: 170,
@@ -656,6 +800,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.35,
     shadowRadius: 18,
     elevation: 6,
+  },
+  audioCardUploading: {
+    backgroundColor: '#94a3b8',
   },
   audioIconContainer: {
     width: 60,
@@ -735,29 +882,10 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "800",
   },
-  buttonRow: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  uploadButton: {
-    flex: 1,
-    backgroundColor: '#ef4444',
-    borderRadius: 16,
-    paddingVertical: 16,
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    shadowColor: "#ef4444",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 5,
-  },
   generateButton: {
-    flex: 1,
     backgroundColor: '#06b6d4',
     borderRadius: 16,
-    paddingVertical: 16,
+    paddingVertical: 20,
     flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
@@ -784,25 +912,26 @@ const styles = StyleSheet.create({
   },
   deleteButton: {
     position: "absolute",
-    top: 12,
-    left: 12,
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: 'rgba(239, 68, 68, 0.95)',
+    top: 8,
+    right: 8,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(100, 116, 139, 0.85)',
     justifyContent: "center",
     alignItems: "center",
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 2,
+    zIndex: 10,
   },
   deleteButtonText: {
     color: "#fff",
-    fontSize: 26,
+    fontSize: 20,
     fontWeight: "400",
-    lineHeight: 26,
+    lineHeight: 20,
   },
   deleteSongButton: {
     width: 36,
