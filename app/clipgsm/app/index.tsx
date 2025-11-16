@@ -11,7 +11,7 @@ export default function ExploreScreen() {
   const [song, setSong] = useState<{ uri: string; name: string } | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const SERVER_URL = "http://10.121.222.165:8000";
+  const SERVER_URL = "http://10.122.28.116:8000";
 
   async function pickMedia() {
     const { granted } = await ImagePicker.requestMediaLibraryPermissionsAsync();

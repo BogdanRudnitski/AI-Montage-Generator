@@ -18,7 +18,9 @@ OUTPUT_FOLDER = PROJECT_ROOT / "backend/uploads/final_videos"
 ANALYSIS_JSON = SCRIPT_DIR / "audio_analysis.json"
 
 # === CONFIGURATION ===
-MAX_DURATION = 60  # Maximum video duration (in seconds)
+# Read MAX_DURATION from environment variable (set by main.py)
+# Falls back to 60 if not set
+MAX_DURATION = int(os.environ.get('MAX_DURATION', '60'))
 # Change this to generate longer videos (e.g., 120 for 2 minutes, None for full song)
 
 # Beat types that should trigger clip changes
@@ -293,15 +295,30 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
     print(f"✅ Video created successfully!\n")
 
 def main():
-    """Main function that automatically processes the first song from analysis results"""
+    """Main function that automatically processes the song specified in options.json"""
     # Get script directory for resolving relative paths
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
     
     # Resolve paths relative to script directory
     analysis_json_path = os.path.join(script_dir, ANALYSIS_JSON)
     clips_folder_abs = os.path.join(script_dir, CLIPS_FOLDER)
     audio_folder_abs = os.path.join(script_dir, AUDIO_FOLDER)
     output_folder_abs = os.path.join(script_dir, OUTPUT_FOLDER)
+    options_file = os.path.join(project_root, "backend", "uploads", "options.json")
+    
+    # Load options to find which song to process
+    target_song = None
+    if os.path.exists(options_file):
+        try:
+            with open(options_file, 'r') as f:
+                options = json.load(f)
+                target_song = options.get('song_filename')
+                print(f"📋 Loaded options from options.json")
+                if target_song:
+                    print(f"   Target song: {target_song}\n")
+        except Exception as e:
+            print(f"⚠️  Error reading options.json: {e}\n")
     
     # Check for analysis file
     if not os.path.exists(analysis_json_path):
@@ -317,16 +334,35 @@ def main():
         print("❌ No analysis results found!\n")
         return
     
-    # Get first song automatically
+    # Find the song to process
     songs = list(results.keys())
-    if not songs:
-        print("❌ No songs found in analysis results!\n")
-        return
     
-    selected_songs = [songs[0]]  # Use first song
-    first_song = songs[0]
+    if target_song:
+        # Look for exact match or the most recent analysis of this song
+        if target_song in results:
+            selected_song = target_song
+            print(f"✅ Found analysis for: {target_song}\n")
+        else:
+            # Check if there's a match without timestamp suffix
+            base_name = target_song.rsplit('.', 1)[0]  # Remove extension
+            matches = [s for s in songs if s.startswith(base_name)]
+            
+            if matches:
+                # Get most recent analysis (last in list)
+                selected_song = matches[-1]
+                print(f"✅ Found recent analysis: {selected_song}")
+                print(f"   (Requested: {target_song})\n")
+            else:
+                print(f"❌ No analysis found for: {target_song}")
+                print(f"   Available songs: {', '.join(songs)}\n")
+                return
+    else:
+        # No target specified, use first song
+        selected_song = songs[0]
+        print(f"⚠️  No song specified in options.json")
+        print(f"   Using first available: {selected_song}\n")
     
-    print(f"🎵 Automatically processing first song: {first_song}")
+    print(f"🎵 Processing: {selected_song}")
     print(f"⚙️  Using configured MAX_DURATION = {MAX_DURATION}\n")
     
     # Initialize clip manager with absolute path
@@ -345,49 +381,68 @@ def main():
     print("⚡ ULTRA FAST MODE: Direct ffmpeg processing\n")
     print("="*60)
     
-    # Process selected songs
-    for filename in selected_songs:
-        data = results[filename]
-        audio_path = os.path.join(audio_folder_abs, filename)
+    # Process the selected song
+    data = results[selected_song]
+    
+    # Find the actual audio file (might have different name than analysis key)
+    audio_files = [f for f in os.listdir(audio_folder_abs) 
+                   if f.lower().endswith(('.mp3', '.wav', '.m4a'))]
+    
+    # Try to find matching audio file
+    audio_path = None
+    
+    # First try exact match
+    if selected_song in audio_files:
+        audio_path = os.path.join(audio_folder_abs, selected_song)
+    else:
+        # Try matching by base name
+        base_name = selected_song.rsplit('.', 1)[0]
+        for audio_file in audio_files:
+            if audio_file.rsplit('.', 1)[0] == base_name or audio_file == base_name:
+                audio_path = os.path.join(audio_folder_abs, audio_file)
+                break
+    
+    if not audio_path or not os.path.exists(audio_path):
+        print(f"⚠️  Audio file not found for: {selected_song}")
+        print(f"   Searched in: {audio_folder_abs}")
+        print(f"   Available files: {', '.join(audio_files)}\n")
+        return
+    
+    # Output filename
+    video_filename = selected_song.rsplit('.', 1)[0] + '_final.mp4'
+    output_path = os.path.join(output_folder_abs, video_filename)
+    
+    print(f"\n🎵 Processing: {selected_song}")
+    print(f"   Audio file: {os.path.basename(audio_path)}")
+    print(f"   BPM: {data.get('bpm', 0):.1f}")
+    print(f"   Analyzed duration: {data.get('duration', 0):.2f}s")
+    
+    cut_points = data.get('cut_points', [])
+    
+    if not cut_points:
+        print("   ⚠️  No cut points found, skipping...\n")
+        return
+    
+    try:
+        create_video_ultrafast(
+            audio_path, 
+            cut_points, 
+            clip_manager, 
+            output_path,
+            max_duration=MAX_DURATION
+        )
         
-        if not os.path.exists(audio_path):
-            print(f"⚠️  Audio file not found: {audio_path}")
-            continue
+        # Reset clip usage
+        clip_manager.clip_usage = {clip['filename']: [] for clip in clip_manager.clips}
+        clip_manager.last_used_clip = None
         
-        # Output filename
-        video_filename = filename.rsplit('.', 1)[0] + '_final.mp4'
-        output_path = os.path.join(output_folder_abs, video_filename)
-        
-        print(f"\n🎵 Processing: {filename}")
-        print(f"   BPM: {data.get('bpm', 0):.1f}")
-        print(f"   Analyzed duration: {data.get('duration', 0):.2f}s")
-        
-        cut_points = data.get('cut_points', [])
-        
-        if not cut_points:
-            print("   ⚠️  No cut points found, skipping...\n")
-            continue
-        
-        try:
-            create_video_ultrafast(
-                audio_path, 
-                cut_points, 
-                clip_manager, 
-                output_path,
-                max_duration=MAX_DURATION  # Use configured max duration
-            )
-            
-            # Reset clip usage for next video
-            clip_manager.clip_usage = {clip['filename']: [] for clip in clip_manager.clips}
-            clip_manager.last_used_clip = None
-            
-        except Exception as e:
-            print(f"❌ Error creating video: {e}\n")
-            import traceback
-            traceback.print_exc()
+    except Exception as e:
+        print(f"❌ Error creating video: {e}\n")
+        import traceback
+        traceback.print_exc()
     
     print("="*60)
-    print(f"✅ All videos created in '{OUTPUT_FOLDER}'!")
+    print(f"✅ Video created in '{OUTPUT_FOLDER}'!")
     print("="*60 + "\n")
 
 if __name__ == "__main__":
