@@ -15,7 +15,9 @@ AUDIO_FOLDER = "../backend/uploads/songs"
 OUTPUT_JSON = "audio_analysis.json"
 
 # === CONFIGURATION ===
-MAX_DURATION = 60  # Maximum duration to analyze and generate (in seconds)
+# Read MAX_DURATION from environment variable (set by main.py)
+# Falls back to 60 if not set
+MAX_DURATION = int(os.environ.get('MAX_DURATION', '60'))
 # Change this to analyze/generate longer videos (e.g., 120 for 2 minutes, None for full song)
 
 # Density presets
@@ -626,10 +628,12 @@ def main():
     """Main function that automatically runs analysis on first song with configured parameters"""
     # Get script directory for resolving relative paths
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
     
     # Resolve paths relative to script directory
     audio_folder_abs = os.path.join(script_dir, AUDIO_FOLDER)
     output_json_abs = os.path.join(script_dir, OUTPUT_JSON)
+    options_file = os.path.join(project_root, "backend", "uploads", "options.json")
     
     if not os.path.exists(audio_folder_abs):
         os.makedirs(audio_folder_abs)
@@ -644,12 +648,56 @@ def main():
         print(f"❌ No audio files in '{AUDIO_FOLDER}'\n")
         return
     
-    # Get first song
-    first_song = audio_files[0]
+    # Load options for all settings
+    target_song = None
+    density = 'medium'
+    aggressiveness = 0.7
+    focus_bass = True
+    focus_vocals = True
+    focus_repetitions = True
+    sync_to_grid = False
+    
+    if os.path.exists(options_file):
+        try:
+            with open(options_file, 'r') as f:
+                options = json.load(f)
+                target_song = options.get('song_filename')
+                density = options.get('density', 'medium')
+                aggressiveness = options.get('aggressiveness', 0.7)
+                
+                # Genre/focus settings
+                focus_bass = options.get('focus_bass', True)
+                focus_vocals = options.get('focus_vocals', True)
+                focus_repetitions = options.get('focus_repetitions', True)
+                sync_to_grid = options.get('sync_to_grid', False)
+                
+                print(f"📋 Loaded options from options.json")
+                if target_song:
+                    print(f"   Target song: {target_song}")
+                print(f"   Density: {density}, Aggressiveness: {aggressiveness}")
+                print(f"   Focus - Bass: {focus_bass}, Vocals: {focus_vocals}, Repetitions: {focus_repetitions}")
+                print(f"   Sync to grid: {sync_to_grid}\n")
+        except Exception as e:
+            print(f"⚠️  Error reading options.json: {e}")
+            print(f"   Using default settings\n")
+    else:
+        print(f"⚠️  options.json not found, using default settings\n")
+    
+    # Find the song to analyze
+    if target_song and target_song in audio_files:
+        first_song = target_song
+        print(f"🎵 Analyzing specified song: {first_song}")
+    else:
+        # Use first available song
+        first_song = audio_files[0]
+        if target_song:
+            print(f"⚠️  Specified song '{target_song}' not found")
+            print(f"   Available: {', '.join(audio_files)}")
+        print(f"🎵 Analyzing first available song: {first_song}")
+    
     audio_path = os.path.join(audio_folder_abs, first_song)
     
-    print(f"🎵 Automatically analyzing first song: {first_song}")
-    print(f"⚙️  Using configured parameters from MAX_DURATION = {MAX_DURATION}\n")
+    print(f"⚙️  Max duration: {MAX_DURATION}s\n")
     
     # Load existing results
     existing_results = {}
@@ -657,17 +705,17 @@ def main():
         with open(output_json_abs, 'r') as f:
             existing_results = json.load(f)
     
-    # Run analysis with configured parameters
+    # Run analysis with configured parameters from options.json
     try:
         analysis = analyze_audio_advanced(
             audio_path,
-            density='medium',
-            aggressiveness=0.7,
-            max_duration=MAX_DURATION,  # Use configured max duration
-            focus_bass=True,
-            focus_vocals=True,
-            focus_repetitions=True,
-            sync_to_grid=False
+            density=density,
+            aggressiveness=aggressiveness,
+            max_duration=MAX_DURATION,
+            focus_bass=focus_bass,
+            focus_vocals=focus_vocals,
+            focus_repetitions=focus_repetitions,
+            sync_to_grid=sync_to_grid
         )
         
         results = existing_results.copy()
@@ -676,6 +724,18 @@ def main():
         # Save results
         with open(output_json_abs, 'w') as f:
             json.dump(results, f, indent=2)
+        
+        # Also update options.json with the analyzed song filename
+        if os.path.exists(options_file):
+            try:
+                with open(options_file, 'r') as f:
+                    options = json.load(f)
+                options['song_filename'] = first_song
+                with open(options_file, 'w') as f:
+                    json.dump(options, f, indent=2)
+                print(f"✅ Updated options.json with song_filename: {first_song}")
+            except Exception as e:
+                print(f"⚠️  Could not update options.json: {e}")
         
         print(f"{'='*60}")
         print(f"✅ Analysis saved to '{OUTPUT_JSON}'")
@@ -691,6 +751,14 @@ def main():
         print(f"   Cut points: {len(data['cut_points'])}")
         if 'total_candidates' in data:
             print(f"   Total candidates analyzed: {data['total_candidates']}")
+        
+        # Show what was detected
+        settings = data.get('settings', {})
+        print(f"\n   Detection settings used:")
+        print(f"   - Bass drops: {settings.get('focus_bass', 'N/A')}")
+        print(f"   - Vocals: {settings.get('focus_vocals', 'N/A')}")
+        print(f"   - Repetitions: {settings.get('focus_repetitions', 'N/A')}")
+        
         print(f"{'─'*60}")
         
         for i, point in enumerate(data['cut_points'][:15], 1):
