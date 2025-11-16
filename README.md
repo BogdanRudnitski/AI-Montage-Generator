@@ -26,3 +26,21 @@ pip install -r requirements.txt
 cd app/ai
 source venv/bin/activate
 pip install -r requirements.txt
+
+
+
+# TO RUN APP WITH BACKEND
+
+# Open a terminal
+# from source of project, i.e. from codejam15
+
+cd app/backend
+source venv/bin/activate
+uvicorn main:1 --reload --host 0.0.0.0 --port 8000
+
+
+# Open a 2nd terminal
+# from source of project, i.e. from codejam15
+
+cd app/clipgsm
+npm run ios
