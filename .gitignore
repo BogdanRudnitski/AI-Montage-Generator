@@ -45,3 +45,9 @@ ENV/
 __pycache__/
 *.tmp
 *.cache/
+
+*.expo
+
+node_modules/
+
+expo-env.d.ts
