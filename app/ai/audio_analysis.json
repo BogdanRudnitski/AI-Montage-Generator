@@ -158,6 +158,8 @@
       {
         "timestamp": 13.299229024943312,
         "score": 100,
+        "type": "pattern_change",
+        "strength": 0.9396557966326378,
         "type": "vocal_transient",
         "strength": 459.44828518748307,
         "on_grid": true,
