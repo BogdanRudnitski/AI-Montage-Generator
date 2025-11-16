@@ -7,6 +7,11 @@ import os
 import sys
 import subprocess
 
+# === CONFIGURATION ===
+MAX_DURATION = 60  # Maximum duration for analysis and video generation (in seconds)
+# Change this to process longer videos (e.g., 120 for 2 minutes, None for full song)
+# This value should match the MAX_DURATION in analyze.py and clip_maker.py
+
 # Get the directory where this script is located
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -18,6 +23,7 @@ def run_analyze():
     """Run the audio analysis script"""
     print("="*60)
     print("🎵 STEP 1: Running audio analysis...")
+    print(f"   Max duration: {MAX_DURATION}s")
     print("="*60 + "\n")
     
     try:
@@ -44,6 +50,7 @@ def run_analyze():
 def run_clip_maker():
     print("="*60)
     print("🎬 STEP 2: Creating video montage...")
+    print(f"   Max duration: {MAX_DURATION}s")
     print("="*60 + "\n")
     
     try:
@@ -81,6 +88,10 @@ def main():
     """Main pipeline: analyze then create clips"""
     print("\n" + "="*60)
     print("🚀 AI VIDEO MONTAGE PIPELINE")
+    if MAX_DURATION:
+        print(f"   Configured for {MAX_DURATION}s montages")
+    else:
+        print("   Configured for full-length videos")
     print("="*60 + "\n")
     
     # Step 1: Run analysis
@@ -95,8 +106,9 @@ def main():
     
     print("\n" + "="*60)
     print("🎉 PIPELINE COMPLETE!")
+    if MAX_DURATION:
+        print(f"   Generated {MAX_DURATION}s montage")
     print("="*60 + "\n")
 
 if __name__ == "__main__":
     main()
-

@@ -1,4 +1,4 @@
-# main_v2.py - Advanced multi-band beat detection system
+# analyze.py - Advanced multi-band beat detection system
 import os
 import json
 import torch
@@ -13,6 +13,10 @@ from datetime import datetime
 
 AUDIO_FOLDER = "../backend/uploads/songs"
 OUTPUT_JSON = "audio_analysis.json"
+
+# === CONFIGURATION ===
+MAX_DURATION = 60  # Maximum duration to analyze and generate (in seconds)
+# Change this to analyze/generate longer videos (e.g., 120 for 2 minutes, None for full song)
 
 # Density presets
 DENSITY_PRESETS = {
@@ -384,7 +388,7 @@ def analyze_audio_advanced(
     audio_path,
     density='medium',
     aggressiveness=0.7,
-    preview_mode=False,
+    max_duration=None,  # NEW PARAMETER
     focus_bass=True,
     focus_vocals=True,
     focus_repetitions=True,
@@ -396,7 +400,11 @@ def analyze_audio_advanced(
     print(f"🎵 Analyzing: {os.path.basename(audio_path)}")
     print(f"{'='*60}\n")
     print(f"⚙️  Settings: density={density}, aggressiveness={aggressiveness:.1f}")
-    print(f"   Preview: {preview_mode}, Bass: {focus_bass}, Vocals: {focus_vocals}, Repetitions: {focus_repetitions}\n")
+    
+    if max_duration:
+        print(f"   Max duration: {max_duration}s, Bass: {focus_bass}, Vocals: {focus_vocals}, Repetitions: {focus_repetitions}\n")
+    else:
+        print(f"   Full song, Bass: {focus_bass}, Vocals: {focus_vocals}, Repetitions: {focus_repetitions}\n")
     
     # Load Demucs
     print("🤖 Loading Demucs AI model...")
@@ -414,16 +422,17 @@ def analyze_audio_advanced(
     elif wav_np.shape[0] == 1:
         wav_np = np.vstack([wav_np, wav_np])
     
-    duration = wav_np.shape[1] / sr
+    full_duration = wav_np.shape[1] / sr
     
-    # Preview mode: only first 60s
-    if preview_mode:
-        max_samples = int(60 * sr)
+    # Apply max duration limit
+    if max_duration and max_duration > 0:
+        max_samples = int(max_duration * sr)
         wav_np = wav_np[:, :max_samples]
-        duration = 60
-        print(f"   🎯 PREVIEW MODE: Processing first 60 seconds\n")
-    
-    print(f"   Duration: {duration:.2f}s | Sample rate: {sr}Hz\n")
+        duration = min(max_duration, full_duration)
+        print(f"   ⏱️  Processing first {duration:.2f}s (of {full_duration:.2f}s total)\n")
+    else:
+        duration = full_duration
+        print(f"   Duration: {duration:.2f}s | Sample rate: {sr}Hz\n")
     
     # AI separation
     print("🎛️  Running AI source separation...")
@@ -464,7 +473,7 @@ def analyze_audio_advanced(
     else:
         vocal_times, vocal_strengths = np.array([]), np.array([])
     
-    # Vocal repetitions (NEW!)
+    # Vocal repetitions
     if focus_repetitions:
         print("🔁 Detecting vocal repetitions (repeated words/syllables)...")
         vocal_repetitions = detect_vocal_repetitions(vocal_mono, sr)
@@ -510,7 +519,7 @@ def analyze_audio_advanced(
             'multi_band': 0
         })
     
-    # Add vocal repetitions (NEW!)
+    # Add vocal repetitions
     for rep in vocal_repetitions:
         candidates.append({
             'time': rep['time'],
@@ -596,14 +605,16 @@ def analyze_audio_advanced(
     return {
         'last_analyzed': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'duration': float(duration),
+        'full_duration': float(full_duration),
+        'max_duration': max_duration,
         'bpm': float(tempo),
-        'beat_times': [float(t) for t in beat_times[:20]],  # Sample
+        'beat_times': [float(t) for t in beat_times[:20]],
         'total_candidates': len(candidates),
         'cut_points': filtered,
         'settings': {
             'density': density,
             'aggressiveness': aggressiveness,
-            'preview_mode': preview_mode,
+            'max_duration': max_duration,
             'focus_bass': focus_bass,
             'focus_vocals': focus_vocals,
             'focus_repetitions': focus_repetitions,
@@ -611,141 +622,8 @@ def analyze_audio_advanced(
         }
     }
 
-def test_interactive():
-    """Interactive test function that asks for song selection and beat synthesizer settings"""
-    if not os.path.exists(AUDIO_FOLDER):
-        os.makedirs(AUDIO_FOLDER)
-        print(f"📁 Created '{AUDIO_FOLDER}' folder")
-        print("👉 Add .mp3 or .wav files!\n")
-        return
-    
-    audio_files = [f for f in os.listdir(AUDIO_FOLDER) 
-                   if f.lower().endswith(('.mp3', '.wav', '.m4a'))]
-    
-    if not audio_files:
-        print(f"❌ No audio files in '{AUDIO_FOLDER}'\n")
-        return
-    
-    # Load existing results
-    existing_results = {}
-    if os.path.exists(OUTPUT_JSON):
-        with open(OUTPUT_JSON, 'r') as f:
-            existing_results = json.load(f)
-    
-    # Show available songs
-    print(f"🎧 Found {len(audio_files)} audio file(s):\n")
-    for i, audio_file in enumerate(audio_files, 1):
-        analyzed = "✅ Analyzed" if audio_file in existing_results else "⭕ Not analyzed"
-        print(f"  {i}. {audio_file} | {analyzed}")
-    
-    print("\n" + "="*60)
-    
-    # Get user choice
-    while True:
-        choice = input("\n🎯 Enter song number (or 'all' for all songs, 'q' to quit): ").strip().lower()
-        
-        if choice == 'q':
-            print("👋 Exiting...\n")
-            return
-        
-        if choice == 'all':
-            selected_files = audio_files
-            break
-        
-        try:
-            song_idx = int(choice) - 1
-            if 0 <= song_idx < len(audio_files):
-                selected_files = [audio_files[song_idx]]
-                break
-            else:
-                print(f"❌ Please enter a number between 1 and {len(audio_files)}")
-        except ValueError:
-            print("❌ Please enter a valid number, 'all', or 'q'")
-    
-    # Get settings
-    print("\n" + "="*60)
-    print("\n⚙️  SETTINGS:\n")
-    
-    density = input("Cut density (low/medium/high/insane) [medium]: ").strip().lower() or 'medium'
-    if density not in DENSITY_PRESETS:
-        density = 'medium'
-    
-    agg_input = input("Aggressiveness 0.0-1.0 [0.7]: ").strip() or '0.7'
-    try:
-        aggressiveness = float(agg_input)
-        aggressiveness = max(0.0, min(1.0, aggressiveness))
-    except:
-        aggressiveness = 0.7
-    
-    preview = input("Preview mode (first 60s only)? (y/n) [n]: ").strip().lower() == 'y'
-    focus_bass = input("Focus on bass drops? (y/n) [y]: ").strip().lower() != 'n'
-    focus_vocals = input("Focus on vocals? (y/n) [y]: ").strip().lower() != 'n'
-    focus_reps = input("Focus on vocal repetitions (e.g. 'floor floor')? (y/n) [y]: ").strip().lower() != 'n'
-    sync_grid = input("Force sync to beat grid? (y/n) [n]: ").strip().lower() == 'y'
-    
-    print("\n" + "="*60 + "\n")
-    
-    results = existing_results.copy()
-    
-    for audio_file in selected_files:
-        audio_path = os.path.join(AUDIO_FOLDER, audio_file)
-        try:
-            analysis = analyze_audio_advanced(
-                audio_path,
-                density=density,
-                aggressiveness=aggressiveness,
-                preview_mode=preview,
-                focus_bass=focus_bass,
-                focus_vocals=focus_vocals,
-                focus_repetitions=focus_reps,
-                sync_to_grid=sync_grid
-            )
-            results[audio_file] = analysis
-            
-            # Save after each
-            with open(OUTPUT_JSON, 'w') as f:
-                json.dump(results, f, indent=2)
-            
-        except Exception as e:
-            print(f"❌ Error: {e}\n")
-            import traceback
-            traceback.print_exc()
-            continue
-    
-    print(f"{'='*60}")
-    print(f"✅ Analysis saved to '{OUTPUT_JSON}'")
-    print(f"{'='*60}\n")
-    
-    # Print summary
-    print("📊 CUT POINTS SUMMARY:\n")
-    for filename in selected_files:
-        if filename not in results:
-            continue
-        
-        data = results[filename]
-        print(f"🎵 {filename}")
-        print(f"   BPM: {data['bpm']:.1f} | Duration: {data['duration']:.2f}s")
-        print(f"   Cut points: {len(data['cut_points'])}")
-        if 'total_candidates' in data:
-            print(f"   Total candidates analyzed: {data['total_candidates']}")
-        print(f"{'─'*60}")
-        
-        for i, point in enumerate(data['cut_points'][:15], 1):
-            grid_icon = "🎯" if point.get('on_grid') else "⚪"
-            
-            # Show repetition gap for vocal repetitions
-            extra_info = ""
-            if point['type'] == 'vocal_repetition' and point.get('repetition_gap'):
-                extra_info = f" [gap: {point['repetition_gap']:.2f}s]"
-            
-            print(f"  {i:2d}. {point['timestamp']:6.2f}s {grid_icon} {point['type']:20s} (score: {point['score']}){extra_info}")
-        
-        if len(data['cut_points']) > 15:
-            print(f"  ... and {len(data['cut_points']) - 15} more")
-        print()
-
 def main():
-    """Main function that automatically runs analysis on first song with default parameters"""
+    """Main function that automatically runs analysis on first song with configured parameters"""
     # Get script directory for resolving relative paths
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
@@ -771,7 +649,7 @@ def main():
     audio_path = os.path.join(audio_folder_abs, first_song)
     
     print(f"🎵 Automatically analyzing first song: {first_song}")
-    print(f"⚙️  Using default parameters: density=medium, aggressiveness=0.7\n")
+    print(f"⚙️  Using configured parameters from MAX_DURATION = {MAX_DURATION}\n")
     
     # Load existing results
     existing_results = {}
@@ -779,13 +657,13 @@ def main():
         with open(output_json_abs, 'r') as f:
             existing_results = json.load(f)
     
-    # Run analysis with default parameters
+    # Run analysis with configured parameters
     try:
         analysis = analyze_audio_advanced(
             audio_path,
             density='medium',
             aggressiveness=0.7,
-            preview_mode=False,
+            max_duration=MAX_DURATION,  # Use configured max duration
             focus_bass=True,
             focus_vocals=True,
             focus_repetitions=True,
@@ -807,7 +685,9 @@ def main():
         print("📊 CUT POINTS SUMMARY:\n")
         data = results[first_song]
         print(f"🎵 {first_song}")
-        print(f"   BPM: {data['bpm']:.1f} | Duration: {data['duration']:.2f}s")
+        print(f"   BPM: {data['bpm']:.1f} | Analyzed: {data['duration']:.2f}s")
+        if data.get('max_duration'):
+            print(f"   (Limited to first {data['max_duration']}s of {data['full_duration']:.2f}s total)")
         print(f"   Cut points: {len(data['cut_points'])}")
         if 'total_candidates' in data:
             print(f"   Total candidates analyzed: {data['total_candidates']}")
