@@ -2,12 +2,12 @@ import React, { useState, useEffect } from "react";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Video, ResizeMode } from "expo-av";
-import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, StyleSheet, Dimensions, Switch } from "react-native";
+import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, Switch } from "react-native";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import Slider from '@react-native-community/slider';
 
-const { width } = Dimensions.get('window');
+import { styles } from "./indexStyles";
 
 interface MediaItem {
   uri: string;
@@ -35,7 +35,7 @@ export default function ExploreScreen() {
   const [density, setDensity] = useState<'low' | 'medium' | 'high' | 'insane'>('medium');
   const [aggressiveness, setAggressiveness] = useState(0.7);
 
-  const SERVER_URL = "http://10.122.245.118:8000";
+  const SERVER_URL = "http://192.168.68.107:8000";
 
   // Check if all media and song are uploaded
   const allUploaded = mediaList.length > 0 && 
@@ -70,34 +70,42 @@ export default function ExploreScreen() {
   }
 
   async function uploadMediaInParallel(files: MediaItem[], startIdx: number) {
-    // Mark all files as uploading
-    setMediaList(prev => prev.map((item, idx) => 
-      idx >= startIdx && idx < startIdx + files.length 
-        ? { ...item, uploading: true } 
-        : item
-    ));
-
-    // Upload all files in parallel
-    const uploadPromises = files.map(async (file, i) => {
-      const actualIndex = startIdx + i;
-      const success = await uploadSingleFile(file, i);
+    const BATCH_SIZE = 3; // Upload 3 files at a time
+    
+    // Process files in batches
+    for (let batchStart = 0; batchStart < files.length; batchStart += BATCH_SIZE) {
+      const batch = files.slice(batchStart, batchStart + BATCH_SIZE);
+      const batchStartIdx = startIdx + batchStart;
       
-      // Update individual file status
+      // Mark batch files as uploading
       setMediaList(prev => prev.map((item, idx) => 
-        idx === actualIndex 
-          ? { ...item, uploading: false, uploaded: success } 
+        idx >= batchStartIdx && idx < batchStartIdx + batch.length 
+          ? { ...item, uploading: true } 
           : item
       ));
 
-      if (!success) {
-        Alert.alert("Upload Failed", `Failed to upload ${file.filename}`);
-      }
+      // Upload batch in parallel
+      const batchPromises = batch.map(async (file, i) => {
+        const actualIndex = batchStartIdx + i;
+        const success = await uploadSingleFile(file, batchStart + i);
+        
+        // Update individual file status
+        setMediaList(prev => prev.map((item, idx) => 
+          idx === actualIndex 
+            ? { ...item, uploading: false, uploaded: success } 
+            : item
+        ));
 
-      return { success, index: actualIndex };
-    });
+        if (!success) {
+          Alert.alert("Upload Failed", `Failed to upload ${file.filename}`);
+        }
 
-    // Wait for all uploads to complete
-    await Promise.all(uploadPromises);
+        return { success, index: actualIndex };
+      });
+
+      // Wait for current batch to complete before starting next batch
+      await Promise.all(batchPromises);
+    }
   }
 
   async function pickMedia() {
@@ -107,28 +115,45 @@ export default function ExploreScreen() {
       return;
     }
 
+    // Show helper alert for large selections
+    if (mediaList.length === 0) {
+      Alert.alert(
+        "📸 Selecting Media",
+        "Native picker works best with 5-7 files at a time. For more files, use 'Add More' button after each selection.",
+        [{ text: "Got it!", style: "default" }]
+      );
+    }
+
+    console.log("Opening image picker...");
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.All,
+      mediaTypes: ['images', 'videos'],
       allowsMultipleSelection: true,
-      selectionLimit: 0,
-      quality: 1,
+      selectionLimit: 0, // No limit - let users try
+      quality: 0.7, // Reduced quality for faster processing
+      videoMaxDuration: 180, // 3 min max to avoid huge files
+      exif: false,
+      base64: false,
     });
 
-    if (!result.canceled) {
+    console.log("Picker returned:", result.canceled ? "canceled" : `${result.assets?.length || 0} files`);
+
+    if (!result.canceled && result.assets && result.assets.length > 0) {
       const newFiles = result.assets.map((asset, index) => ({
         uri: asset.uri,
-        filename: asset.fileName || `file_${index}.${asset.type === "video" ? "mp4" : "jpg"}`,
+        filename: asset.fileName || `file_${Date.now()}_${index}.${asset.type === "video" ? "mp4" : "jpg"}`,
         type: asset.type as "image" | "video",
         uploading: false,
         uploaded: false,
       }));
+
+      console.log(`Processing ${newFiles.length} files...`);
 
       const shouldAppend = mediaList.length > 0;
       
       if (shouldAppend) {
         const startIndex = mediaList.length;
         setMediaList(prev => [...prev, ...newFiles]);
-        // Upload in parallel
+        // Upload in batches
         uploadMediaInParallel(newFiles, startIndex);
       } else {
         try {
@@ -139,9 +164,15 @@ export default function ExploreScreen() {
           console.error("Failed to clear uploads:", err);
         }
         setMediaList(newFiles);
-        // Upload in parallel
+        // Upload in batches
         uploadMediaInParallel(newFiles, 0);
       }
+    } else if (!result.canceled && result.assets?.length === 0) {
+      Alert.alert(
+        "No files selected",
+        "The picker closed without selecting files. This can happen when selecting many large videos. Try selecting fewer files (5-7) at a time.",
+        [{ text: "OK" }]
+      );
     }
   }
 
@@ -160,7 +191,7 @@ export default function ExploreScreen() {
     formData.append("focus_bass", focusBass.toString());
     formData.append("focus_vocals", focusVocals.toString());
     formData.append("focus_repetitions", focusRepetitions.toString());
-    formData.append("sync_to_grid", syncToGrid.toString()); // ← ADD THIS LINE
+    formData.append("sync_to_grid", syncToGrid.toString());
 
     try {
       setSongUploading(true);
@@ -285,7 +316,7 @@ export default function ExploreScreen() {
   }
 
   const densityLabels = {
-    low: { label: 'Low', desc: '~30 cuts', emoji: '🐌' },
+    low: { label: 'Low', desc: '~30 cuts', emoji: '🌙' },
     medium: { label: 'Medium', desc: '~60 cuts', emoji: '🚶' },
     high: { label: 'High', desc: '~90 cuts', emoji: '🏃' },
     insane: { label: 'Insane', desc: '~150 cuts', emoji: '🚀' }
@@ -334,7 +365,7 @@ export default function ExploreScreen() {
               <Text style={styles.emptyTitle}>Add Your Media</Text>
               <Text style={styles.emptySubtitle}>Tap to select photos and videos</Text>
               <View style={styles.emptyHint}>
-                <Text style={styles.emptyHintText}>Uploads in parallel</Text>
+                <Text style={styles.emptyHintText}>💡 Tip: Select 5-7 files per batch for best results</Text>
               </View>
             </TouchableOpacity>
           ) : (
@@ -689,693 +720,3 @@ export default function ExploreScreen() {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#f5f7fb",
-  },
-  header: {
-    backgroundColor: "#6366f1",
-    paddingTop: 60,
-    paddingBottom: 30,
-    paddingHorizontal: 24,
-    position: 'relative',
-    overflow: 'hidden',
-  },
-  headerBackground: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: '#6366f1',
-  },
-  headerTitle: {
-    fontSize: 36,
-    fontWeight: "900",
-    color: "#fff",
-    marginBottom: 6,
-    letterSpacing: -0.5,
-    zIndex: 1,
-  },
-  headerSubtitle: {
-    fontSize: 17,
-    color: "rgba(255, 255, 255, 0.95)",
-    fontWeight: "600",
-    zIndex: 1,
-  },
-  headerDecor1: {
-    position: 'absolute',
-    right: -30,
-    top: 50,
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    backgroundColor: 'rgba(255, 255, 255, 0.08)',
-  },
-  headerDecor2: {
-    position: 'absolute',
-    right: -10,
-    top: 110,
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(255, 255, 255, 0.12)',
-  },
-  content: {
-    flex: 1,
-  },
-  section: {
-    paddingHorizontal: 24,
-    marginTop: 28,
-  },
-  sectionHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 16,
-  },
-  sectionTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  sectionIconBg: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: '#fff',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: "#6366f1",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
-    elevation: 3,
-  },
-  sectionIcon: {
-    fontSize: 22,
-  },
-  sectionTitle: {
-    fontSize: 21,
-    fontWeight: "800",
-    color: "#0f172a",
-    letterSpacing: -0.4,
-  },
-  sectionSubtitle: {
-    fontSize: 13,
-    color: "#64748b",
-    fontWeight: "600",
-    marginTop: 2,
-  },
-  countBadge: {
-    backgroundColor: '#6366f1',
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 14,
-    minWidth: 36,
-    alignItems: 'center',
-    shadowColor: "#6366f1",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-    elevation: 3,
-  },
-  countBadgeText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  emptyCard: {
-    backgroundColor: '#fff',
-    borderRadius: 24,
-    padding: 48,
-    alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 16,
-    elevation: 4,
-  },
-  emptyIconContainer: {
-    width: 88,
-    height: 88,
-    borderRadius: 44,
-    backgroundColor: '#eef2ff',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 20,
-    shadowColor: "#6366f1",
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.15,
-    shadowRadius: 10,
-    elevation: 3,
-  },
-  emptyIcon: {
-    fontSize: 44,
-  },
-  emptyTitle: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: "#0f172a",
-    marginBottom: 8,
-    letterSpacing: -0.4,
-  },
-  emptySubtitle: {
-    fontSize: 15,
-    color: "#475569",
-    fontWeight: "600",
-    marginBottom: 18,
-  },
-  emptyHint: {
-    backgroundColor: '#eef2ff',
-    paddingHorizontal: 18,
-    paddingVertical: 8,
-    borderRadius: 12,
-  },
-  emptyHintText: {
-    color: '#6366f1',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  mediaGrid: {
-    paddingVertical: 8,
-  },
-  mediaCard: {
-    marginRight: 14,
-    borderRadius: 20,
-    backgroundColor: "#fff",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.12,
-    shadowRadius: 14,
-    elevation: 5,
-    overflow: "hidden",
-  },
-  mediaContent: {
-    position: "relative",
-  },
-  mediaThumbnail: {
-    width: 170,
-    height: 240,
-    backgroundColor: "#e2e8f0",
-  },
-  uploadOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  uploadingText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-    marginTop: 12,
-  },
-  queuedIndicator: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  queuedText: {
-    fontSize: 32,
-  },
-  uploadedBadge: {
-    position: 'absolute',
-    bottom: 8,
-    left: 8,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: 'rgba(16, 185, 129, 0.9)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: "#10b981",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.2,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  uploadedText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  mediaTypeTag: {
-    position: "absolute",
-    bottom: 8,
-    right: 8,
-    backgroundColor: "rgba(15, 23, 42, 0.75)",
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  mediaTypeText: {
-    color: "#fff",
-    fontSize: 10,
-    fontWeight: "700",
-    letterSpacing: 0.5,
-  },
-  deleteButton: {
-    position: 'absolute',
-    top: 8,
-    right: 8,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: 'rgba(239, 68, 68, 0.95)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: "#ef4444",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  deleteButtonText: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '700',
-    lineHeight: 22,
-  },
-  addMoreCard: {
-    width: 170,
-    height: 240,
-    borderRadius: 20,
-    backgroundColor: '#e2e8f0',
-    justifyContent: "center",
-    alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  addMoreIcon: {
-    fontSize: 52,
-    color: "#64748b",
-    marginBottom: 12,
-    fontWeight: '300',
-  },
-  addMoreText: {
-    fontSize: 17,
-    fontWeight: "700",
-    color: "#64748b",
-  },
-  audioCard: {
-    backgroundColor: "#fff",
-    borderRadius: 20,
-    padding: 20,
-    flexDirection: "row",
-    alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 14,
-    elevation: 3,
-  },
-  audioCardSelected: {
-    backgroundColor: '#6366f1',
-    borderRadius: 20,
-    padding: 20,
-    flexDirection: "row",
-    alignItems: "center",
-    shadowColor: "#6366f1",
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.35,
-    shadowRadius: 18,
-    elevation: 6,
-  },
-  audioCardUploading: {
-    backgroundColor: '#94a3b8',
-  },
-  audioIconContainer: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: '#fef2f2',
-    justifyContent: "center",
-    alignItems: "center",
-    marginRight: 16,
-    shadowColor: "#ef4444",
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 3,
-  },
-  audioIconContainerSelected: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: "rgba(255, 255, 255, 0.2)",
-    justifyContent: "center",
-    alignItems: "center",
-    marginRight: 16,
-  },
-  audioIcon: {
-    fontSize: 30,
-  },
-  audioTextContainer: {
-    flex: 1,
-  },
-  audioTitle: {
-    fontSize: 17,
-    fontWeight: "800",
-    color: "#0f172a",
-    marginBottom: 4,
-    letterSpacing: -0.3,
-  },
-  audioTitleSelected: {
-    fontSize: 17,
-    fontWeight: "800",
-    color: "#fff",
-    marginBottom: 4,
-    letterSpacing: -0.3,
-  },
-  audioSubtitle: {
-    fontSize: 14,
-    color: "#64748b",
-    fontWeight: "600",
-  },
-  audioSubtitleSelected: {
-    fontSize: 14,
-    color: "rgba(255, 255, 255, 0.9)",
-    fontWeight: "600",
-  },
-  chevronContainer: {
-    marginLeft: 8,
-  },
-  chevron: {
-    fontSize: 32,
-    color: "#cbd5e1",
-    fontWeight: "300",
-  },
-  changeButton: {
-    backgroundColor: "rgba(255, 255, 255, 0.25)",
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 12,
-    marginLeft: 8,
-  },
-  changeButtonText: {
-    color: "#fff",
-    fontSize: 14,
-    fontWeight: "700",
-  },
-  deleteSongButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: "rgba(239, 68, 68, 0.9)",
-    justifyContent: "center",
-    alignItems: "center",
-    marginLeft: 8,
-  },
-  deleteSongText: {
-    color: "#fff",
-    fontSize: 24,
-    fontWeight: "700",
-    lineHeight: 26,
-  },
-  durationRow: {
-    flexDirection: "row",
-    gap: 12,
-  },
-  durationButton: {
-    flex: 1,
-    backgroundColor: "#fff",
-    paddingVertical: 18,
-    borderRadius: 16,
-    alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  durationButtonActive: {
-    backgroundColor: "#6366f1",
-    shadowColor: "#6366f1",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 4,
-  },
-  durationText: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: "#475569",
-  },
-  durationTextActive: {
-    color: "#fff",
-  },
-  advancedToggle: {
-    backgroundColor: "#fff",
-    borderRadius: 16,
-    padding: 18,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  advancedToggleLeft: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  advancedToggleText: {
-    fontSize: 17,
-    fontWeight: "700",
-    color: "#0f172a",
-  },
-  advancedContent: {
-    backgroundColor: "#fff",
-    borderRadius: 16,
-    padding: 20,
-    marginTop: 12,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  advancedDescription: {
-    fontSize: 14,
-    color: "#64748b",
-    fontWeight: "600",
-    marginBottom: 20,
-    lineHeight: 20,
-  },
-  densitySection: {
-    marginBottom: 24,
-    paddingBottom: 24,
-    borderBottomWidth: 1,
-    borderBottomColor: "#f1f5f9",
-  },
-  densityHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 6,
-  },
-  densityTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#0f172a",
-  },
-  densityBadge: {
-    backgroundColor: "#eef2ff",
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 10,
-  },
-  densityBadgeText: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#6366f1",
-  },
-  densityDescription: {
-    fontSize: 13,
-    color: "#64748b",
-    fontWeight: "600",
-    marginBottom: 14,
-  },
-  densityGrid: {
-    flexDirection: "row",
-    gap: 10,
-  },
-  densityOption: {
-    flex: 1,
-    backgroundColor: "#f8f9fa",
-    paddingVertical: 14,
-    paddingHorizontal: 8,
-    borderRadius: 12,
-    alignItems: "center",
-    borderWidth: 2,
-    borderColor: "transparent",
-  },
-  densityOptionActive: {
-    backgroundColor: "#eef2ff",
-    borderColor: "#6366f1",
-  },
-  densityEmoji: {
-    fontSize: 24,
-    marginBottom: 6,
-    opacity: 0.5,
-  },
-  densityEmojiActive: {
-    opacity: 1,
-  },
-  densityLabel: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#64748b",
-  },
-  densityLabelActive: {
-    color: "#6366f1",
-  },
-  sliderSection: {
-    marginBottom: 24,
-    paddingBottom: 24,
-    borderBottomWidth: 1,
-    borderBottomColor: "#f1f5f9",
-  },
-  sliderHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 6,
-  },
-  sliderTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#0f172a",
-  },
-  sliderValueBadge: {
-    backgroundColor: "#eef2ff",
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 10,
-    minWidth: 50,
-    alignItems: "center",
-  },
-  sliderValueText: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#6366f1",
-  },
-  sliderDescription: {
-    fontSize: 13,
-    color: "#64748b",
-    fontWeight: "600",
-    marginBottom: 14,
-  },
-  sliderContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  slider: {
-    flex: 1,
-    height: 40,
-  },
-  sliderMinLabel: {
-    fontSize: 18,
-  },
-  sliderMaxLabel: {
-    fontSize: 18,
-  },
-  focusSection: {
-    marginBottom: 0,
-  },
-  focusTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#0f172a",
-    marginBottom: 12,
-  },
-  optionRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: "#f1f5f9",
-  },
-  optionLeft: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 14,
-    flex: 1,
-  },
-  optionIcon: {
-    fontSize: 28,
-  },
-  optionTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#0f172a",
-    marginBottom: 2,
-  },
-  optionDescription: {
-    fontSize: 13,
-    color: "#64748b",
-    fontWeight: "600",
-  },
-  advancedHint: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: "#eef2ff",
-    padding: 14,
-    borderRadius: 12,
-    marginTop: 16,
-  },
-  advancedHintText: {
-    fontSize: 12,
-    color: "#6366f1",
-    fontWeight: "600",
-    flex: 1,
-    lineHeight: 18,
-  },
-  generateButton: {
-    backgroundColor: "#6366f1",
-    paddingVertical: 20,
-    borderRadius: 18,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-    shadowColor: "#6366f1",
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.4,
-    shadowRadius: 16,
-    elevation: 8,
-  },
-  buttonDisabled: {
-    backgroundColor: "#cbd5e1",
-    shadowColor: "#000",
-    shadowOpacity: 0.1,
-  },
-  buttonIcon: {
-    fontSize: 24,
-  },
-  buttonText: {
-    fontSize: 19,
-    fontWeight: "900",
-    color: "#fff",
-    letterSpacing: -0.3,
-  },
-});

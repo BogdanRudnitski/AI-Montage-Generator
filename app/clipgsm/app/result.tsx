@@ -9,7 +9,7 @@ import { Ionicons } from "@expo/vector-icons";
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
-const SERVER_URL = "http://10.122.245.118:8000";
+const SERVER_URL = "http://192.168.68.107:8000";
 
 export default function ResultScreen() {
   const router = useRouter();
