@@ -7,12 +7,14 @@ import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import Slider from '@react-native-community/slider';
 import { SERVER_URL } from "../config";
+import { useAnalyze } from "../context/AnalyzeContext";
 
 const { width } = Dimensions.get('window');
 
 interface MediaItem {
   uri: string;
   filename?: string;
+  serverFilename?: string;
   type: "image" | "video";
   uploading?: boolean;
   uploaded?: boolean;
@@ -20,6 +22,7 @@ interface MediaItem {
 
 export default function ExploreScreen() {
   const router = useRouter();
+  const { setAnalyzeResult, setMediaListForPreview, setSongUri } = useAnalyze();
   const [mediaList, setMediaList] = useState<MediaItem[]>([]);
   const [song, setSong] = useState<{ uri: string; name: string } | null>(null);
   const [songUploading, setSongUploading] = useState(false);
@@ -42,12 +45,12 @@ export default function ExploreScreen() {
                       song !== null && 
                       songUploaded;
 
-  async function uploadSingleFile(file: MediaItem, index: number) {
+  async function uploadSingleFile(file: MediaItem, index: number): Promise<{ success: boolean; serverFilename?: string }> {
     const formData = new FormData();
-    
+    const name = file.filename || `file_${index}.${file.type === "video" ? "mp4" : "jpg"}`;
     formData.append("files", {
       uri: file.uri,
-      name: file.filename || `file_${index}.${file.type === "video" ? "mp4" : "jpg"}`,
+      name,
       type: file.type === "video" ? "video/mp4" : "image/jpeg",
     } as any);
 
@@ -56,15 +59,13 @@ export default function ExploreScreen() {
         method: "POST",
         body: formData,
       });
-
-      if (!res.ok) {
-        throw new Error("Upload failed");
-      }
-
-      return true;
+      if (!res.ok) throw new Error("Upload failed");
+      const data = await res.json();
+      const serverFilename = data.files_saved?.[0];
+      return { success: true, serverFilename };
     } catch (err) {
       console.error("Upload error:", err);
-      return false;
+      return { success: false };
     }
   }
 
@@ -79,20 +80,14 @@ export default function ExploreScreen() {
     // Upload all files in parallel
     const uploadPromises = files.map(async (file, i) => {
       const actualIndex = startIdx + i;
-      const success = await uploadSingleFile(file, i);
-      
-      // Update individual file status
-      setMediaList(prev => prev.map((item, idx) => 
-        idx === actualIndex 
-          ? { ...item, uploading: false, uploaded: success } 
+      const result = await uploadSingleFile(file, i);
+      setMediaList(prev => prev.map((item, idx) =>
+        idx === actualIndex
+          ? { ...item, uploading: false, uploaded: result.success, ...(result.serverFilename && { serverFilename: result.serverFilename }) }
           : item
       ));
-
-      if (!success) {
-        Alert.alert("Upload Failed", `Failed to upload ${file.filename}`);
-      }
-
-      return { success, index: actualIndex };
+      if (!result.success) Alert.alert("Upload Failed", `Failed to upload ${file.filename}`);
+      return { success: result.success, index: actualIndex };
     });
 
     // Wait for all uploads to complete
@@ -210,18 +205,73 @@ export default function ExploreScreen() {
     }
   }, [song, duration, density, aggressiveness, focusBass, focusVocals, focusRepetitions, syncToGrid]);
 
-  async function generateVideo() {
+  async function createPreview() {
     try {
-      router.replace("/loading");
-      
-      const res = await fetch(`${SERVER_URL}/run_ai`, {
-        method: "POST",
+      const res = await fetch(`${SERVER_URL}/analyze`, { method: "POST" });
+      const data = await res.json();
+      if (!data.success) {
+        Alert.alert("Analyze Failed", data.error || "Unknown error");
+        return;
+      }
+      setAnalyzeResult({
+        duration: data.duration,
+        max_duration: data.max_duration,
+        bpm: data.bpm,
+        cut_points: data.cut_points || [],
+        segments: data.segments || [],
       });
+      setMediaListForPreview(
+        mediaList.map((m) => ({
+          uri: m.uri,
+          filename: m.serverFilename || m.filename,
+        }))
+      );
+      setSongUri(song?.uri ?? null);
+      router.replace("/preview");
     } catch (err) {
       console.error(err);
-      Alert.alert("Generation Failed", "Check your network connection.");
-      router.replace("/");
+      Alert.alert("Analyze Failed", "Check your network connection.");
     }
+  }
+
+  /** Decoy preview: fixed cut lengths 1, 2, 3, 4, 3, 2, 1 seconds. No backend. Use to verify segment cutting. */
+  function openDecoyPreview() {
+    const videoItems = mediaList.filter((m) => m.type === "video");
+    if (videoItems.length === 0) {
+      Alert.alert("Need at least one video", "Add video clips to test the preview.");
+      return;
+    }
+    const segmentDurations = [1, 2, 3, 4, 3, 2, 1];
+    let t = 0;
+    const segments = segmentDurations.map((dur, i) => {
+      const startTime = t;
+      t += dur;
+      const clipIndex = i % videoItems.length;
+      const filename = videoItems[clipIndex].serverFilename || videoItems[clipIndex].filename || `clip_${clipIndex}.mp4`;
+      return {
+        startTime,
+        endTime: t,
+        clipFilename: filename,
+        clipStart: 0,
+        clipEnd: dur,
+      };
+    });
+    const totalDuration = t;
+    setAnalyzeResult({
+      duration: totalDuration,
+      max_duration: totalDuration,
+      bpm: 0,
+      cut_points: [],
+      segments,
+    });
+    setMediaListForPreview(
+      mediaList.map((m) => ({
+        uri: m.uri,
+        filename: m.serverFilename || m.filename,
+      }))
+    );
+    setSongUri(song?.uri ?? null);
+    router.replace("/preview");
   }
 
   function removeMedia(index: number) {
@@ -666,7 +716,7 @@ export default function ExploreScreen() {
               styles.generateButton, 
               !allUploaded && styles.buttonDisabled
             ]}
-            onPress={generateVideo}
+            onPress={createPreview}
             activeOpacity={0.8}
             disabled={generateLoading || !allUploaded}
           >
@@ -676,10 +726,24 @@ export default function ExploreScreen() {
               <>
                 <Text style={styles.buttonIcon}>✨</Text>
                 <Text style={styles.buttonText}>
-                  {allUploaded ? "Generate Video" : "Upload files first"}
+                  {allUploaded ? "Analyze & preview" : "Upload files first"}
                 </Text>
               </>
             )}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.decoyButton,
+              mediaList.filter((m) => m.type === "video").length === 0 && styles.buttonDisabled,
+            ]}
+            onPress={openDecoyPreview}
+            activeOpacity={0.8}
+            disabled={mediaList.filter((m) => m.type === "video").length === 0}
+          >
+            <Text style={styles.decoyButtonText}>
+              Test preview (1→2→3→4→3→2→1 s) — no analysis
+            </Text>
           </TouchableOpacity>
         </View>
 
@@ -1376,5 +1440,20 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     color: "#fff",
     letterSpacing: -0.3,
+  },
+  decoyButton: {
+    marginTop: 12,
+    paddingVertical: 14,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: "#94a3b8",
+    backgroundColor: "transparent",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  decoyButtonText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#64748b",
   },
 });
