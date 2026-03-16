@@ -6,6 +6,7 @@ import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicat
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import Slider from '@react-native-community/slider';
+import { SERVER_URL } from "../config";
 
 const { width } = Dimensions.get('window');
 
@@ -34,8 +35,6 @@ export default function ExploreScreen() {
   const [focusRepetitions, setFocusRepetitions] = useState(true);
   const [density, setDensity] = useState<'low' | 'medium' | 'high' | 'insane'>('medium');
   const [aggressiveness, setAggressiveness] = useState(0.7);
-
-  const SERVER_URL = "http://10.122.245.118:8000";
 
   // Check if all media and song are uploaded
   const allUploaded = mediaList.length > 0 && 

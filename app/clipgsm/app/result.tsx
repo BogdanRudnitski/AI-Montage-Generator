@@ -6,10 +6,9 @@ import * as Sharing from "expo-sharing";
 import * as FileSystem from "expo-file-system/legacy";
 import * as MediaLibrary from "expo-media-library";
 import { Ionicons } from "@expo/vector-icons";
+import { SERVER_URL } from "../config";
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
-
-const SERVER_URL = "http://10.122.245.118:8000";
 
 export default function ResultScreen() {
   const router = useRouter();

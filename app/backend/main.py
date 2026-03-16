@@ -212,7 +212,11 @@ async def upload_single_file(files: List[UploadFile] = File(...)):
     saved_files = []
     
     for f in files:
-        save_path = f"uploads/media/{f.filename}"
+        name = f.filename or "unnamed"
+        if not name.strip():
+            name = "unnamed"
+        sanitized_name = sanitize_filename(name)
+        save_path = f"uploads/media/{sanitized_name}"
         
         # Save the uploaded file
         with open(save_path, "wb") as buffer:

@@ -10,8 +10,10 @@ venv/
 env/
 ENV/
 
-# Environment variables
+# Environment variables (server URL, secrets – copy .env.example and set your IP)
 .env
+.env.local
+*.env.local
 
 # IDEs
 .vscode/
@@ -28,8 +30,12 @@ ENV/
 # Media/large files you don't want to track
 *.mp4
 *.mp3
+*.m4a
 *.wav
 *.flac
+
+# Backend uploads and generated content (user media, songs, final videos)
+app/backend/uploads/
 
 # Model files (YAMNet or others)
 *.h5
@@ -53,5 +59,3 @@ node_modules/
 expo-env.d.ts
 
 app/ai/audio_analysis.json
-
-app/backend/uploads/options.json
