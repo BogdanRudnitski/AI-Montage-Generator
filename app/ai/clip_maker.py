@@ -3,12 +3,21 @@ import json
 import os
 import random
 import re
+import shutil
 import librosa
 import soundfile as sf
 import subprocess
 import numpy as np
 
 from pathlib import Path
+
+
+def _run_ffmpeg(cmd, step_name="ffmpeg"):
+    """Run ffmpeg; on failure print stderr and raise. Prevents silent broken segments."""
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(f"{step_name} failed (code {result.returncode}): {err[:500]}")
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent  # adjust if your FastAPI root is different
@@ -26,6 +35,13 @@ MAX_DURATION = int(os.environ.get('MAX_DURATION', '60'))
 
 # Beat types that should trigger clip changes
 BEAT_CHANGE_TYPES = {'bass_drop', 'vocal_change', 'downbeat'}
+
+# Max time one clip can be held (avoids long "frozen" single-clip segments)
+MAX_SEGMENT_DURATION = 4.0
+# Min segment duration (avoids ffmpeg/zero-length issues)
+MIN_SEGMENT_DURATION = 0.25
+# Same frame rate for every segment so concat doesn't stumble (VFR → CFR)
+SEGMENT_FPS = 30
 
 def sanitize_filename(filename: str) -> str:
     """Remove or replace problematic characters in filenames"""
@@ -164,6 +180,22 @@ class ClipManager:
             'clip_duration': clip_duration
         }
 
+
+def _split_long_segments(timestamps, max_seg_duration):
+    """Insert fake cut points so no segment is longer than max_seg_duration."""
+    out = [timestamps[0]]
+    for i in range(1, len(timestamps)):
+        start = out[-1]['timestamp']
+        end = timestamps[i]['timestamp']
+        seg_len = end - start
+        while seg_len > max_seg_duration:
+            out.append({'timestamp': start + max_seg_duration, 'type': 'split', 'score': 0})
+            start = out[-1]['timestamp']
+            seg_len = end - start
+        out.append(timestamps[i])
+    return out
+
+
 def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, max_duration=None):
     """Create video using direct ffmpeg concat - NO MoviePy for speed"""
     print(f"\n🎬 Creating video ULTRA FAST...")
@@ -204,13 +236,16 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
     # Filter cut points to only those within duration
     cut_points = [p for p in cut_points if p['timestamp'] < duration]
     
-    # Create segments between timestamps
+    # Build timestamps and split any segment longer than MAX_SEGMENT_DURATION to avoid long freezes
     timestamps = [{'timestamp': 0, 'type': 'start', 'score': 0}] + cut_points + [{'timestamp': duration, 'type': 'end', 'score': 0}]
+    timestamps = _split_long_segments(timestamps, MAX_SEGMENT_DURATION)
     
-    print(f"⚡ Generating {len(timestamps)-1} segments...")
+    print(f"⚡ Generating {len(timestamps)-1} segments (max {MAX_SEGMENT_DURATION}s per clip)...")
     
-    # Create temp folder for segments
+    # Wipe temp folder so we never reuse broken/leftover segment files
     temp_folder = "temp_segments"
+    if os.path.exists(temp_folder):
+        shutil.rmtree(temp_folder)
     os.makedirs(temp_folder, exist_ok=True)
     
     segment_files = []
@@ -221,6 +256,11 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         end_time = timestamps[i + 1]['timestamp']
         segment_duration = end_time - start_time
         
+        # Enforce minimum to avoid zero/tiny segments that break ffmpeg
+        if segment_duration < MIN_SEGMENT_DURATION:
+            segment_duration = MIN_SEGMENT_DURATION
+            end_time = start_time + segment_duration
+        
         # Check if this is a major beat
         current_point = timestamps[i + 1]
         force_new_clip = current_point['type'] in BEAT_CHANGE_TYPES and current_point.get('score', 0) >= 20
@@ -228,81 +268,92 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         if force_new_clip:
             print(f"   🎵 Beat drop at {current_point['timestamp']:.2f}s - forcing new clip!")
         
-        # Get segment info (no actual loading)
+        # Get segment info; never skip – use first clip as fallback if needed
         segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=force_new_clip)
-        
+        if not segment_info and clip_manager.clips:
+            segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=False)
         if not segment_info:
-            continue
+            raise RuntimeError("No clips available for segment; cannot continue.")
         
-        # Create segment using ffmpeg directly (FAST!)
+        # Create segment using ffmpeg (fail fast on error)
         segment_output = os.path.join(temp_folder, f"segment_{i:04d}.mp4")
-        
         clip_path = segment_info['path']
         clip_start = segment_info['start']
         clip_duration = segment_info['clip_duration']
         
-        # If clip is shorter than needed, loop it
         if clip_duration < segment_duration:
-            # Calculate how many loops needed
+            # Loop short clip and trim to exact duration
             num_loops = int(np.ceil(segment_duration / clip_duration)) + 1
-            
-            # Create concat demuxer file for looping
             loop_list = os.path.join(temp_folder, f"loop_{i:04d}.txt")
+            # Escape path for concat demuxer (single quotes)
+            abs_path = os.path.abspath(clip_path)
+            safe_path = abs_path.replace("'", "'\\''")
             with open(loop_list, 'w') as f:
                 for _ in range(num_loops):
-                    f.write(f"file '{os.path.abspath(clip_path)}'\n")
-            
-            # Concat and trim to exact duration
-            subprocess.run([
+                    f.write(f"file '{safe_path}'\n")
+            # Same FPS + keyframe at start so concat doesn't freeze at boundaries
+            _run_ffmpeg([
                 'ffmpeg', '-f', 'concat', '-safe', '0', '-i', loop_list,
                 '-t', str(segment_duration),
                 '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2',
-                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
-                '-an',  # No audio in segments
-                '-y', segment_output
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                '-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
+                '-r', str(SEGMENT_FPS), '-vsync', 'cfr',
+                '-force_key_frames', 'expr:gte(t,0)',
+                '-an', '-y', segment_output
+            ], step_name=f"segment_{i} (loop)")
         else:
-            # Extract segment from clip directly
-            subprocess.run([
-                'ffmpeg', '-ss', str(clip_start), '-i', clip_path,
+            # -i then -ss = accurate seek. Same FPS + keyframe at start for clean concat.
+            _run_ffmpeg([
+                'ffmpeg', '-i', clip_path, '-ss', str(clip_start),
                 '-t', str(segment_duration),
                 '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2',
-                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
-                '-an',  # No audio in segments
-                '-y', segment_output
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                '-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
+                '-r', str(SEGMENT_FPS), '-vsync', 'cfr',
+                '-force_key_frames', 'expr:gte(t,0)',
+                '-an', '-y', segment_output
+            ], step_name=f"segment_{i} (extract)")
         
+        # Ensure segment was written and has content (catches silent ffmpeg failures)
+        if not os.path.exists(segment_output) or os.path.getsize(segment_output) < 1000:
+            raise RuntimeError(f"Segment {i} produced invalid file: {segment_output}")
+        
+        abs_seg = os.path.abspath(segment_output)
+        safe_seg = abs_seg.replace("'", "'\\''")
+        concat_list.append(f"file '{safe_seg}'")
         segment_files.append(segment_output)
-        concat_list.append(f"file '{os.path.abspath(segment_output)}'")
         
         if (i + 1) % 5 == 0:
             print(f"   ✅ Created {i+1}/{len(timestamps)-1} segments")
     
     print(f"\n🔗 Concatenating {len(segment_files)} segments...")
     
-    # Create concat file
     concat_file = os.path.join(temp_folder, "concat.txt")
     with open(concat_file, 'w') as f:
         f.write('\n'.join(concat_list))
     
-    # Concatenate all segments
     temp_video = os.path.join(temp_folder, "video_no_audio.mp4")
-    subprocess.run([
+    _run_ffmpeg([
         'ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_file,
-        '-c', 'copy',  # Copy without re-encoding (SUPER FAST)
-        '-y', temp_video
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        '-c', 'copy', '-y', temp_video
+    ], step_name="concat segments")
     
-    print(f"🎵 Adding audio track...")
+    # Re-encode trim to one continuous stream (avoids concat-boundary freezes from -c copy)
+    temp_video_trimmed = os.path.join(temp_folder, "video_trimmed.mp4")
+    _run_ffmpeg([
+        'ffmpeg', '-i', temp_video, '-t', str(duration),
+        '-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
+        '-r', str(SEGMENT_FPS), '-vsync', 'cfr',
+        '-an', '-y', temp_video_trimmed
+    ], step_name="trim and re-encode")
     
-    # Add audio to final video
-    subprocess.run([
-        'ffmpeg', '-i', temp_video, '-i', audio_path,
-        '-c:v', 'copy',  # Copy video (no re-encoding)
-        '-c:a', 'aac', '-b:a', '192k',
-        '-shortest',  # Match shortest stream
+    print(f"🎵 Adding audio track ({duration:.1f}s)...")
+    
+    _run_ffmpeg([
+        'ffmpeg', '-i', temp_video_trimmed, '-i', audio_path,
+        '-t', str(duration),
+        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
         '-y', output_path
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ], step_name="mux audio")
     
     print(f"🧹 Cleaning up temporary files...")
     
@@ -311,11 +362,13 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         if os.path.exists(f):
             os.remove(f)
     
-    # Clean up other temp files
     for f in os.listdir(temp_folder):
         file_path = os.path.join(temp_folder, f)
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        try:
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+        except OSError:
+            pass
     
     if os.path.exists(temp_folder):
         os.rmdir(temp_folder)
@@ -328,15 +381,15 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
 
 def main():
     """Main function that automatically processes the song specified in options.json"""
-    # Get script directory for resolving relative paths
+    # Get script directory and project root for resolving paths
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
     
-    # Resolve paths relative to script directory
-    analysis_json_path = os.path.join(script_dir, ANALYSIS_JSON)
-    clips_folder_abs = os.path.join(script_dir, CLIPS_FOLDER)
-    audio_folder_abs = os.path.join(script_dir, AUDIO_FOLDER)
-    output_folder_abs = os.path.join(script_dir, OUTPUT_FOLDER)
+    # Paths: analysis in ai/, media/output in backend/uploads/
+    analysis_json_path = os.path.join(script_dir, os.path.basename(ANALYSIS_JSON))
+    clips_folder_abs = os.path.join(project_root, "backend", "uploads", "media")
+    audio_folder_abs = os.path.join(project_root, "backend", "uploads", "songs")
+    output_folder_abs = os.path.join(project_root, "backend", "uploads", "final_videos")
     options_file = os.path.join(project_root, "backend", "uploads", "options.json")
     
     # Load options to find which song to process
