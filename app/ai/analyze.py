@@ -18,29 +18,14 @@ OUTPUT_JSON = "audio_analysis.json"
 # Read MAX_DURATION from environment variable (set by main.py)
 # Falls back to 60 if not set
 MAX_DURATION = int(os.environ.get('MAX_DURATION', '60'))
+# Change this to analyze/generate longer videos (e.g., 120 for 2 minutes, None for full song)
 
-# Density presets - NOW WITH PERCENTAGES!
+# Density presets
 DENSITY_PRESETS = {
-    'low': {
-        'min_distance': 1.0,            # Minimum 1s between cuts
-        'score_threshold': 70,           # High threshold - only best moments
-        'candidate_percentage': 0.15     # Take top 15% of candidates
-    },
-    'medium': {
-        'min_distance': 0.5,            # Minimum 0.5s between cuts
-        'score_threshold': 50,           # Medium threshold
-        'candidate_percentage': 0.30     # Take top 30% of candidates
-    },
-    'high': {
-        'min_distance': 0.25,           # Minimum 0.25s between cuts
-        'score_threshold': 35,           # Lower threshold
-        'candidate_percentage': 0.45     # Take top 45% of candidates
-    },
-    'insane': {
-        'min_distance': 0.15,           # Minimum 0.15s between cuts
-        'score_threshold': 25,           # Very low threshold
-        'candidate_percentage': 0.60     # Take top 60% of candidates
-    }
+    'low': {'min_distance': 1.0, 'score_threshold': 70, 'max_cuts': 30},
+    'medium': {'min_distance': 0.5, 'score_threshold': 50, 'max_cuts': 60},
+    'high': {'min_distance': 0.25, 'score_threshold': 35, 'max_cuts': 90},
+    'insane': {'min_distance': 0.15, 'score_threshold': 25, 'max_cuts': 150}
 }
 
 def bandpass_filter(data, lowcut, highcut, sr, order=4):
@@ -405,13 +390,13 @@ def analyze_audio_advanced(
     audio_path,
     density='medium',
     aggressiveness=0.7,
-    max_duration=None,
+    max_duration=None,  # NEW PARAMETER
     focus_bass=True,
     focus_vocals=True,
     focus_repetitions=True,
     sync_to_grid=False
 ):
-    """Advanced multi-band audio analysis with percentage-based cuts"""
+    """Advanced multi-band audio analysis"""
     
     print(f"\n{'='*60}")
     print(f"🎵 Analyzing: {os.path.basename(audio_path)}")
@@ -432,7 +417,7 @@ def analyze_audio_advanced(
     
     # Load audio
     print("📂 Loading audio...")
-    wav_np, sr = librosa.load(audio_path, sr=22050, mono=False)
+    wav_np, sr = librosa.load(audio_path, sr=22050, mono=False)  # 22050 for speed
     
     if wav_np.ndim == 1:
         wav_np = np.stack([wav_np, wav_np])
@@ -601,35 +586,23 @@ def analyze_audio_advanced(
                 'repetition_gap': float(candidate.get('gap', 0)) if candidate['type'] == 'vocal_repetition' else None
             })
     
-    # PERCENTAGE-BASED FILTERING STARTS HERE
-    
-    # STEP 1: Remove duplicates within min_distance (keep highest score)
+    # Remove duplicates (within min_distance)
     scored_candidates.sort(key=lambda x: x['timestamp'])
-    deduplicated = []
+    filtered = []
     
     for candidate in scored_candidates:
-        if not deduplicated or (candidate['timestamp'] - deduplicated[-1]['timestamp']) >= preset['min_distance']:
-            deduplicated.append(candidate)
-        elif candidate['score'] > deduplicated[-1]['score']:
-            deduplicated[-1] = candidate
+        if not filtered or (candidate['timestamp'] - filtered[-1]['timestamp']) >= preset['min_distance']:
+            filtered.append(candidate)
+        elif candidate['score'] > filtered[-1]['score']:
+            filtered[-1] = candidate
     
-    # STEP 2: Sort by score (best first)
-    deduplicated.sort(key=lambda x: (-x['score'], x['timestamp']))
+    # Sort by score
+    filtered.sort(key=lambda x: (-x['score'], x['timestamp']))
     
-    # STEP 3: Take top X% of candidates
-    num_candidates = len(deduplicated)
-    target_cuts = int(num_candidates * preset['candidate_percentage'])
+    # Limit to max cuts
+    filtered = filtered[:preset['max_cuts']]
     
-    print(f"✅ Filtering cuts:")
-    print(f"   Total candidates: {num_candidates}")
-    print(f"   Taking top {preset['candidate_percentage']*100:.0f}%: {target_cuts} cuts")
-    print(f"   Average density: {target_cuts/duration:.2f} cuts/second\n")
-    
-    # STEP 4: Take the best cuts
-    final_cuts = deduplicated[:target_cuts]
-    
-    # Sort by timestamp for output
-    final_cuts.sort(key=lambda x: x['timestamp'])
+    print(f"✅ Generated {len(filtered)} cut points (threshold: {adjusted_threshold:.1f})\n")
     
     return {
         'last_analyzed': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -639,8 +612,7 @@ def analyze_audio_advanced(
         'bpm': float(tempo),
         'beat_times': [float(t) for t in beat_times[:20]],
         'total_candidates': len(candidates),
-        'filtered_candidates': num_candidates,
-        'cut_points': final_cuts,
+        'cut_points': filtered,
         'settings': {
             'density': density,
             'aggressiveness': aggressiveness,
@@ -648,9 +620,7 @@ def analyze_audio_advanced(
             'focus_bass': focus_bass,
             'focus_vocals': focus_vocals,
             'focus_repetitions': focus_repetitions,
-            'sync_to_grid': sync_to_grid,
-            'target_cuts': target_cuts,
-            'percentage_used': preset['candidate_percentage']
+            'sync_to_grid': sync_to_grid
         }
     }
 
@@ -781,14 +751,9 @@ def main():
         print(f"   Cut points: {len(data['cut_points'])}")
         if 'total_candidates' in data:
             print(f"   Total candidates analyzed: {data['total_candidates']}")
-        if 'filtered_candidates' in data:
-            print(f"   After filtering: {data['filtered_candidates']}")
         
-        # Show what percentage was used
+        # Show what was detected
         settings = data.get('settings', {})
-        if 'percentage_used' in settings:
-            print(f"   Percentage taken: {settings['percentage_used']*100:.0f}%")
-        
         print(f"\n   Detection settings used:")
         print(f"   - Bass drops: {settings.get('focus_bass', 'N/A')}")
         print(f"   - Vocals: {settings.get('focus_vocals', 'N/A')}")

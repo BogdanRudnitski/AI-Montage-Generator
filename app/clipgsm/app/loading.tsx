@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { View, Text, StyleSheet, ActivityIndicator, Animated } from "react-native";
 import { useRouter } from "expo-router";
 
-const SERVER_URL = "http://192.168.68.107:8000";
+const SERVER_URL = "http://10.122.245.118:8000";
 
 export default function LoadingScreen() {
   const router = useRouter();

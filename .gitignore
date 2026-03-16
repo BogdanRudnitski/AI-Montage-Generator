@@ -55,5 +55,3 @@ expo-env.d.ts
 app/ai/audio_analysis.json
 
 app/backend/uploads/options.json
-
-*.MOV
