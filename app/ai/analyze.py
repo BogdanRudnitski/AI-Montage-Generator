@@ -586,22 +586,38 @@ def analyze_audio_advanced(
                 'repetition_gap': float(candidate.get('gap', 0)) if candidate['type'] == 'vocal_repetition' else None
             })
     
-    # Remove duplicates (within min_distance)
+    # Remove duplicates (within min_distance), keep time order
     scored_candidates.sort(key=lambda x: x['timestamp'])
     filtered = []
-    
     for candidate in scored_candidates:
         if not filtered or (candidate['timestamp'] - filtered[-1]['timestamp']) >= preset['min_distance']:
             filtered.append(candidate)
         elif candidate['score'] > filtered[-1]['score']:
             filtered[-1] = candidate
-    
-    # Sort by score
-    filtered.sort(key=lambda x: (-x['score'], x['timestamp']))
-    
-    # Limit to max cuts
-    filtered = filtered[:preset['max_cuts']]
-    
+
+    # Spread cut points across the full duration instead of taking top N by score
+    # (top-by-score clusters cuts in the "best" section and leaves long segments elsewhere)
+    max_cuts = preset['max_cuts']
+    if len(filtered) > max_cuts:
+        # Divide timeline into max_cuts buckets; pick best cut per bucket
+        bucket_width = duration / max_cuts
+        buckets = [[] for _ in range(max_cuts)]
+        for c in filtered:
+            t = c['timestamp']
+            if t >= duration:
+                continue
+            idx = min(int(t / bucket_width), max_cuts - 1)
+            buckets[idx].append(c)
+        filtered = []
+        for bucket in buckets:
+            if bucket:
+                best = max(bucket, key=lambda x: (x['score'], -x['timestamp']))
+                filtered.append(best)
+        filtered.sort(key=lambda x: x['timestamp'])
+    else:
+        # Already time-sorted; keep as-is
+        filtered.sort(key=lambda x: x['timestamp'])
+
     print(f"✅ Generated {len(filtered)} cut points (threshold: {adjusted_threshold:.1f})\n")
     
     return {

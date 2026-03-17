@@ -745,6 +745,16 @@ export default function ExploreScreen() {
               Test preview (1→2→3→4→3→2→1 s) — no analysis
             </Text>
           </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.decoyButton, { marginTop: 8, backgroundColor: "#8b5cf6" }]}
+            onPress={() => router.push("/timeline-demo")}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.decoyButtonText}>
+              Try timeline demo — no uploads, test resize & scrub
+            </Text>
+          </TouchableOpacity>
         </View>
 
         <View style={{ height: 40 }} />

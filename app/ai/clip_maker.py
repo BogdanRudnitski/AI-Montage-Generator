@@ -196,7 +196,48 @@ def _split_long_segments(timestamps, max_seg_duration):
     return out
 
 
-def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, max_duration=None):
+def compute_segments_only(cut_points, duration, clip_manager, max_duration=None):
+    """
+    Build segment list (which clip, in/out) from cut_points and duration.
+    No ffmpeg - used for preview and for saving segments.json before export.
+    Returns list of { startTime, endTime, clipFilename, clipStart, clipEnd }.
+    """
+    cut_points = sorted(cut_points, key=lambda x: x['timestamp'])
+    cut_points = [p for p in cut_points if p['timestamp'] < duration]
+    timestamps = [{'timestamp': 0, 'type': 'start', 'score': 0}] + cut_points + [{'timestamp': duration, 'type': 'end', 'score': 0}]
+    timestamps = _split_long_segments(timestamps, MAX_SEGMENT_DURATION)
+    segments = []
+    for i in range(len(timestamps) - 1):
+        start_time = timestamps[i]['timestamp']
+        end_time = timestamps[i + 1]['timestamp']
+        segment_duration = end_time - start_time
+        if segment_duration < MIN_SEGMENT_DURATION:
+            segment_duration = MIN_SEGMENT_DURATION
+            end_time = start_time + segment_duration
+        current_point = timestamps[i + 1]
+        force_new_clip = current_point['type'] in BEAT_CHANGE_TYPES and current_point.get('score', 0) >= 20
+        segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=force_new_clip)
+        if not segment_info and clip_manager.clips:
+            segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=False)
+        if not segment_info:
+            raise RuntimeError("No clips available for segment; cannot continue.")
+        clip_duration = segment_info['clip_duration']
+        clip_start = segment_info['start']
+        if clip_duration < segment_duration:
+            clip_end = clip_duration  # full clip; client will loop
+        else:
+            clip_end = clip_start + segment_duration
+        segments.append({
+            "startTime": round(start_time, 3),
+            "endTime": round(end_time, 3),
+            "clipFilename": segment_info['filename'],
+            "clipStart": round(clip_start, 3),
+            "clipEnd": round(clip_end, 3),
+        })
+    return segments
+
+
+def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, max_duration=None, precomputed_segments=None):
     """Create video using direct ffmpeg concat - NO MoviePy for speed"""
     print(f"\n🎬 Creating video ULTRA FAST...")
     print(f"   Audio: {os.path.basename(audio_path)}")
@@ -233,14 +274,56 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         duration = full_duration
         print(f"   Duration: {duration:.2f}s\n")
     
-    # Filter cut points to only those within duration
-    cut_points = [p for p in cut_points if p['timestamp'] < duration]
-    
-    # Build timestamps and split any segment longer than MAX_SEGMENT_DURATION to avoid long freezes
-    timestamps = [{'timestamp': 0, 'type': 'start', 'score': 0}] + cut_points + [{'timestamp': duration, 'type': 'end', 'score': 0}]
-    timestamps = _split_long_segments(timestamps, MAX_SEGMENT_DURATION)
-    
-    print(f"⚡ Generating {len(timestamps)-1} segments (max {MAX_SEGMENT_DURATION}s per clip)...")
+    # Build list of segment specs: either from precomputed_segments or from cut_points + clip_manager
+    segment_specs = []
+    if precomputed_segments:
+        # Resolve clip filename to path via clip_manager
+        filename_to_path = {c['filename']: c['path'] for c in clip_manager.clips}
+        for seg in precomputed_segments:
+            segment_duration = seg['endTime'] - seg['startTime']
+            clip_path = filename_to_path.get(seg['clipFilename'])
+            if not clip_path:
+                raise RuntimeError(f"Precomputed segment references unknown clip: {seg['clipFilename']}")
+            clip_start = seg['clipStart']
+            clip_end = seg['clipEnd']
+            in_clip_duration = clip_end - clip_start
+            segment_specs.append({
+                'clip_path': clip_path,
+                'clip_start': clip_start,
+                'segment_duration': segment_duration,
+                'clip_duration': in_clip_duration,
+            })
+        print(f"⚡ Using {len(segment_specs)} precomputed segments...")
+    else:
+        cut_points = [p for p in cut_points if p['timestamp'] < duration]
+        timestamps = [{'timestamp': 0, 'type': 'start', 'score': 0}] + cut_points + [{'timestamp': duration, 'type': 'end', 'score': 0}]
+        timestamps = _split_long_segments(timestamps, MAX_SEGMENT_DURATION)
+        print(f"⚡ Generating {len(timestamps)-1} segments (max {MAX_SEGMENT_DURATION}s per clip)...")
+        for i in range(len(timestamps) - 1):
+            start_time = timestamps[i]['timestamp']
+            end_time = timestamps[i + 1]['timestamp']
+            segment_duration = end_time - start_time
+            if segment_duration < MIN_SEGMENT_DURATION:
+                segment_duration = MIN_SEGMENT_DURATION
+                end_time = start_time + segment_duration
+            current_point = timestamps[i + 1]
+            force_new_clip = current_point['type'] in BEAT_CHANGE_TYPES and current_point.get('score', 0) >= 20
+            segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=force_new_clip)
+            if not segment_info and clip_manager.clips:
+                segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=False)
+            if not segment_info:
+                raise RuntimeError("No clips available for segment; cannot continue.")
+            clip_duration = segment_info['clip_duration']
+            if clip_duration < segment_duration:
+                in_clip_duration = clip_duration
+            else:
+                in_clip_duration = segment_duration
+            segment_specs.append({
+                'clip_path': segment_info['path'],
+                'clip_start': segment_info['start'],
+                'segment_duration': segment_duration,
+                'clip_duration': clip_duration,
+            })
     
     # Wipe temp folder so we never reuse broken/leftover segment files
     temp_folder = "temp_segments"
@@ -251,35 +334,12 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
     segment_files = []
     concat_list = []
     
-    for i in range(len(timestamps) - 1):
-        start_time = timestamps[i]['timestamp']
-        end_time = timestamps[i + 1]['timestamp']
-        segment_duration = end_time - start_time
-        
-        # Enforce minimum to avoid zero/tiny segments that break ffmpeg
-        if segment_duration < MIN_SEGMENT_DURATION:
-            segment_duration = MIN_SEGMENT_DURATION
-            end_time = start_time + segment_duration
-        
-        # Check if this is a major beat
-        current_point = timestamps[i + 1]
-        force_new_clip = current_point['type'] in BEAT_CHANGE_TYPES and current_point.get('score', 0) >= 20
-        
-        if force_new_clip:
-            print(f"   🎵 Beat drop at {current_point['timestamp']:.2f}s - forcing new clip!")
-        
-        # Get segment info; never skip – use first clip as fallback if needed
-        segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=force_new_clip)
-        if not segment_info and clip_manager.clips:
-            segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=False)
-        if not segment_info:
-            raise RuntimeError("No clips available for segment; cannot continue.")
-        
-        # Create segment using ffmpeg (fail fast on error)
+    for i, spec in enumerate(segment_specs):
         segment_output = os.path.join(temp_folder, f"segment_{i:04d}.mp4")
-        clip_path = segment_info['path']
-        clip_start = segment_info['start']
-        clip_duration = segment_info['clip_duration']
+        clip_path = spec['clip_path']
+        clip_start = spec['clip_start']
+        segment_duration = spec['segment_duration']
+        clip_duration = spec['clip_duration']
         
         if clip_duration < segment_duration:
             # Loop short clip and trim to exact duration
@@ -323,7 +383,7 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         segment_files.append(segment_output)
         
         if (i + 1) % 5 == 0:
-            print(f"   ✅ Created {i+1}/{len(timestamps)-1} segments")
+            print(f"   ✅ Created {i+1}/{len(segment_specs)} segments")
     
     print(f"\n🔗 Concatenating {len(segment_files)} segments...")
     
@@ -510,13 +570,25 @@ def main():
         print("   ⚠️  No cut points found, skipping...\n")
         return
     
+    # Use precomputed segments from POST /analyze if present (export-only path)
+    segments_path = os.path.join(os.path.dirname(output_folder_abs), "segments.json")
+    precomputed_segments = None
+    if os.path.exists(segments_path):
+        try:
+            with open(segments_path, 'r') as f:
+                precomputed_segments = json.load(f)
+            print(f"   Using {len(precomputed_segments)} precomputed segments from segments.json")
+        except Exception as e:
+            print(f"   ⚠️  Could not load segments.json: {e}")
+    
     try:
         create_video_ultrafast(
             audio_path, 
             cut_points, 
             clip_manager, 
             output_path,
-            max_duration=MAX_DURATION
+            max_duration=MAX_DURATION,
+            precomputed_segments=precomputed_segments
         )
         
         # Reset clip usage

@@ -36,7 +36,7 @@ pip install -r requirements.txt
 
 cd app/backend
 source venv/bin/activate
-uvicorn main:1 --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --host 0.0.0.0 --port 8000
 
 
 # Open a 2nd terminal
