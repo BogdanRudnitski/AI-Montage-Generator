@@ -1,4 +1,4 @@
-import React, { useRef, useMemo } from "react";
+import React, { useRef, useMemo, useState, useEffect } from "react";
 import {
   View,
   Image,
@@ -8,24 +8,37 @@ import {
   Dimensions,
   NativeSyntheticEvent,
   NativeTouchEvent,
+  Animated,
 } from "react-native";
 import * as Haptics from "expo-haptics";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const STRIP_HEIGHT = 48;
 const SCROLL_ZONE_HEIGHT = STRIP_HEIGHT * 2;
-const TIMELINE_BLOCK_HEIGHT = STRIP_HEIGHT + SCROLL_ZONE_HEIGHT;
+const SCRUB_ZONE_HEIGHT = Math.round(SCROLL_ZONE_HEIGHT / 4);
+const TIMELINE_BLOCK_HEIGHT = SCRUB_ZONE_HEIGHT + STRIP_HEIGHT + SCROLL_ZONE_HEIGHT;
 
 function debugLog(tag: string, data?: object) {
   if (typeof __DEV__ !== "undefined" && __DEV__) {
     console.log("[TimelineStrip]", tag, data ?? "");
   }
 }
-const BLOCK_GAP = 4;
+/** Logical gap between blocks (0 = clips touch so playhead never disappears in a gap). Use block separator border for visual separation. */
+const BLOCK_GAP = 0;
 const BLOCK_BORDER_RADIUS = 6;
-const SECONDS_PER_VIEWPORT = 10;
+/** Subtle 1px line between blocks for visual separation when BLOCK_GAP is 0. */
+const BLOCK_SEPARATOR_COLOR = "rgba(0, 0, 0, 0.12)";
+const SECONDS_PER_VIEWPORT_DEFAULT = 10;
+const SECONDS_PER_VIEWPORT_MIN = 5;
+const SECONDS_PER_VIEWPORT_MAX = 20;
 const RESIZE_EDGE_WIDTH = 28;
 const SCRUB_HIT_SLOP = 24;
+const THUMB_WIDTH = 40;
+/** Scroll zone inertia: min velocity (px/ms) to trigger coasting; below this release stops immediately. */
+const SCROLL_INERTIA_VELOCITY_THRESHOLD = 0.1;
+/** Per-frame velocity decay during inertia (0–1); higher = longer coast. */
+const SCROLL_INERTIA_DECAY = 0.95;
+const SCROLL_INERTIA_MIN_VELOCITY = 0.02;
 
 export interface SegmentRecord {
   startTime: number;
@@ -46,7 +59,11 @@ interface TimelineStripProps {
   selectedSegmentIndex: number | null;
   onSelectSegment: (index: number | null) => void;
   thumbnailUris: (string | null)[];
+  /** Optional: multiple frame URIs per segment for TikTok-style strip; each segment can have [uri1, uri2, ...]. */
+  thumbnailFrameUris?: (string | null)[][];
   onScrubbingChange?: (scrubbing: boolean) => void;
+  onResizeStart?: () => void;
+  onResizeEnd?: () => void;
   timelineScrollX: number;
   onTimelineScrollChange: (x: number) => void;
   timelineViewportWidth: number;
@@ -54,6 +71,10 @@ interface TimelineStripProps {
   timelineScrollRef: React.RefObject<ScrollView | null>;
   /** "moveCut" = only move the cut between two clips (default). "trim" = change duration and shift following segments. */
   resizeMode?: "moveCut" | "trim";
+  /** Seconds of timeline shown across the viewport width; default 10. Two-finger zoom in scroll zone changes this. */
+  secondsPerViewport?: number;
+  /** Called when user zooms with two fingers in the scroll zone. */
+  onSecondsPerViewportChange?: (value: number) => void;
 }
 
 export default function TimelineStrip({
@@ -65,16 +86,21 @@ export default function TimelineStrip({
   selectedSegmentIndex,
   onSelectSegment,
   thumbnailUris,
+  thumbnailFrameUris,
   onScrubbingChange,
+  onResizeStart,
+  onResizeEnd,
   timelineScrollX,
   onTimelineScrollChange,
   timelineViewportWidth,
   onTimelineViewportLayout,
   timelineScrollRef,
   resizeMode = "moveCut",
+  secondsPerViewport = SECONDS_PER_VIEWPORT_DEFAULT,
+  onSecondsPerViewportChange,
 }: TimelineStripProps) {
   const stripWidth =
-    totalDuration > 0 ? (totalDuration / SECONDS_PER_VIEWPORT) * SCREEN_WIDTH : SCREEN_WIDTH;
+    totalDuration > 0 ? (totalDuration / secondsPerViewport) * SCREEN_WIDTH : SCREEN_WIDTH;
 
   const stripLayout = useMemo(() => {
     const n = segments.length;
@@ -360,6 +386,7 @@ export default function TimelineStrip({
         try {
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         } catch (_) {}
+        onResizeStart?.();
         onScrubbingChange?.(true);
         return;
       }
@@ -376,11 +403,12 @@ export default function TimelineStrip({
         try {
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         } catch (_) {}
+        onResizeStart?.();
         onScrubbingChange?.(true);
         return;
       }
     }
-    if (Math.abs(x - playheadX) <= SCRUB_HIT_SLOP) {
+    if (sel === null && Math.abs(x - playheadX) <= SCRUB_HIT_SLOP) {
       debugLog("gesture", { type: "scrub" });
       gestureRef.current = { type: "scrub" };
       onScrubbingChange?.(true);
@@ -512,41 +540,176 @@ export default function TimelineStrip({
     if (g.type === "scrub") {
       onScrubbingChange?.(false);
     }
+    if (g.type === "resizeLeft" || g.type === "resizeRight") {
+      onResizeEnd?.();
+    }
     if (g.type === "tap" && g.tapStartX != null) {
       const idx = getSegmentIndexAtX(g.tapStartX);
       if (idx != null) {
-        onSelectSegment(idx);
+        if (idx === selectedSegmentIndex) {
+          onSelectSegment(null);
+        } else {
+          onSelectSegment(idx);
+        }
       }
     }
     gestureRef.current = { type: "idle" };
   };
 
   const handleTouchCancel = () => {
+    if (gestureRef.current.type === "resizeLeft" || gestureRef.current.type === "resizeRight") {
+      onResizeEnd?.();
+    }
     onScrubbingChange?.(false);
     gestureRef.current = { type: "idle" };
   };
 
   const handleScrollZoneTouchStart = (e: NativeSyntheticEvent<NativeTouchEvent>) => {
-    scrollTrackStartScrollX.current = timelineScrollX;
-    scrollTrackStartPageX.current = e.nativeEvent.pageX;
+    const touches = e.nativeEvent.touches;
+    if (touches.length >= 2) {
+      scrollZoneGestureRef.current = "zoom";
+      const d = Math.hypot(
+        touches[1].pageX - touches[0].pageX,
+        touches[1].pageY - touches[0].pageY
+      );
+      zoomInitialDistanceRef.current = d;
+      zoomInitialSecondsPerViewportRef.current = secondsPerViewport;
+    } else if (touches.length === 1) {
+      scrollZoneGestureRef.current = "scroll";
+      scrollTrackStartScrollX.current = timelineScrollX;
+      scrollTrackStartPageX.current = touches[0].pageX;
+      scrollZoneLastMoveTime.current = null;
+      if (inertiaRafRef.current != null) {
+        cancelAnimationFrame(inertiaRafRef.current);
+        inertiaRafRef.current = null;
+      }
+    }
   };
 
   const handleScrollZoneTouchMove = (e: NativeSyntheticEvent<NativeTouchEvent>) => {
-    const dx = e.nativeEvent.pageX - scrollTrackStartPageX.current;
-    const nextX = Math.max(
-      0,
-      Math.min(maxTimelineScroll, scrollTrackStartScrollX.current - dx)
-    );
-    onTimelineScrollChange(nextX);
-    timelineScrollRef.current?.scrollTo({ x: nextX, animated: false });
+    const touches = e.nativeEvent.touches;
+    if (scrollZoneGestureRef.current === "zoom" && touches.length >= 2 && onSecondsPerViewportChange) {
+      const d = Math.hypot(
+        touches[1].pageX - touches[0].pageX,
+        touches[1].pageY - touches[0].pageY
+      );
+      const delta = (d - zoomInitialDistanceRef.current) * 0.015;
+      const newSPV = Math.max(
+        SECONDS_PER_VIEWPORT_MIN,
+        Math.min(SECONDS_PER_VIEWPORT_MAX, zoomInitialSecondsPerViewportRef.current - delta)
+      );
+      onSecondsPerViewportChange(newSPV);
+    } else if (scrollZoneGestureRef.current === "scroll" && touches.length === 1) {
+      const dx = touches[0].pageX - scrollTrackStartPageX.current;
+      const nextX = Math.max(
+        0,
+        Math.min(maxTimelineScroll, scrollTrackStartScrollX.current - dx)
+      );
+      const now = Date.now();
+      if (scrollZoneLastMoveTime.current != null) {
+        const dt = now - scrollZoneLastMoveTime.current;
+        if (dt > 0) {
+          const prevX = scrollZoneLastScrollX.current;
+          scrollZoneVelocity.current = (nextX - prevX) / dt;
+        }
+      }
+      scrollZoneLastScrollX.current = nextX;
+      scrollZoneLastMoveTime.current = now;
+      onTimelineScrollChange(nextX);
+      timelineScrollRef.current?.scrollTo({ x: nextX, animated: false });
+      showScrollTrack();
+    }
   };
 
   const maxTimelineScroll = Math.max(0, stripWidth - timelineViewportWidth);
   const scrollTrackStartScrollX = useRef(0);
   const scrollTrackStartPageX = useRef(0);
+  const scrollZoneGestureRef = useRef<"scroll" | "zoom" | null>(null);
+  const zoomInitialDistanceRef = useRef(0);
+  const zoomInitialSecondsPerViewportRef = useRef(secondsPerViewport);
+  const scrollZoneLastMoveTime = useRef<number | null>(null);
+  const scrollZoneLastScrollX = useRef(0);
+  const scrollZoneVelocity = useRef(0);
+  const inertiaScrollXRef = useRef(0);
+  const inertiaRafRef = useRef<number | null>(null);
+
+  const handleScrollZoneTouchEnd = () => {
+    const wasScroll = scrollZoneGestureRef.current === "scroll";
+    const velocity = scrollZoneVelocity.current;
+    scrollZoneGestureRef.current = null;
+    scrollZoneLastMoveTime.current = null;
+
+    if (wasScroll && maxTimelineScroll > 0 && Math.abs(velocity) >= SCROLL_INERTIA_VELOCITY_THRESHOLD) {
+      if (inertiaRafRef.current != null) cancelAnimationFrame(inertiaRafRef.current);
+      let v = velocity;
+      inertiaScrollXRef.current = timelineScrollX;
+      const max = maxTimelineScroll;
+      let lastTime = Date.now();
+
+      const tick = () => {
+        const now = Date.now();
+        const dt = Math.min(now - lastTime, 50);
+        lastTime = now;
+        let x = inertiaScrollXRef.current;
+        x += v * dt;
+        v *= SCROLL_INERTIA_DECAY;
+        if (x < 0) {
+          x = 0;
+          v = 0;
+        } else if (x > max) {
+          x = max;
+          v = 0;
+        }
+        inertiaScrollXRef.current = x;
+        onTimelineScrollChange(x);
+        timelineScrollRef.current?.scrollTo({ x, animated: false });
+        showScrollTrack();
+        if (Math.abs(v) >= SCROLL_INERTIA_MIN_VELOCITY) {
+          inertiaRafRef.current = requestAnimationFrame(tick);
+        } else {
+          inertiaRafRef.current = null;
+        }
+      };
+      inertiaRafRef.current = requestAnimationFrame(tick);
+    }
+  };
+
+  const handleScrollZoneTouchCancel = () => {
+    scrollZoneGestureRef.current = null;
+    scrollZoneLastMoveTime.current = null;
+    if (inertiaRafRef.current != null) {
+      cancelAnimationFrame(inertiaRafRef.current);
+      inertiaRafRef.current = null;
+    }
+  };
+
+  const scrollTrackOpacity = useRef(new Animated.Value(0)).current;
+  const scrollTrackHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showScrollTrack = () => {
+    if (scrollTrackHideTimeoutRef.current) {
+      clearTimeout(scrollTrackHideTimeoutRef.current);
+      scrollTrackHideTimeoutRef.current = null;
+    }
+    Animated.timing(scrollTrackOpacity, {
+      toValue: 1,
+      duration: 40,
+      useNativeDriver: true,
+    }).start();
+    scrollTrackHideTimeoutRef.current = setTimeout(() => {
+      scrollTrackHideTimeoutRef.current = null;
+      Animated.timing(scrollTrackOpacity, {
+        toValue: 0,
+        duration: 200,
+        useNativeDriver: true,
+      }).start();
+    }, 1000);
+  };
+
   const handleScrollTrackStart = (e: NativeSyntheticEvent<NativeTouchEvent>) => {
     scrollTrackStartScrollX.current = timelineScrollX;
     scrollTrackStartPageX.current = e.nativeEvent.pageX;
+    showScrollTrack();
   };
   const handleScrollTrackMove = (e: NativeSyntheticEvent<NativeTouchEvent>) => {
     const dx = e.nativeEvent.pageX - scrollTrackStartPageX.current;
@@ -556,6 +719,7 @@ export default function TimelineStrip({
     );
     onTimelineScrollChange(nextX);
     timelineScrollRef.current?.scrollTo({ x: nextX, animated: false });
+    showScrollTrack();
   };
 
   const formatTime = (seconds: number) => {
@@ -563,6 +727,71 @@ export default function TimelineStrip({
     const s = Math.floor(seconds % 60);
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
+
+  const [showScrubStamp, setShowScrubStamp] = useState(false);
+  const scrubStampOpacity = useRef(new Animated.Value(0)).current;
+  const scrubStampHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrubZoneActiveRef = useRef(false);
+
+  const getScrubZoneStripX = (pageX: number) => {
+    const x = pageX - viewportLeftRef.current + timelineScrollX;
+    return Math.max(0, Math.min(stripWidth, x));
+  };
+
+  const handleScrubZoneTouchStart = () => {
+    viewportRef.current?.measureInWindow((x) => {
+      viewportLeftRef.current = x;
+    });
+    if (stripWidth <= 0 || totalDuration <= 0) return;
+    if (scrubStampHideTimeoutRef.current) {
+      clearTimeout(scrubStampHideTimeoutRef.current);
+      scrubStampHideTimeoutRef.current = null;
+    }
+    scrubZoneActiveRef.current = true;
+    onScrubbingChange?.(true);
+    setShowScrubStamp(true);
+    Animated.timing(scrubStampOpacity, { toValue: 1, duration: 150, useNativeDriver: true }).start();
+  };
+
+  const handleScrubZoneTouchMove = (e: NativeSyntheticEvent<NativeTouchEvent>) => {
+    if (!scrubZoneActiveRef.current || stripWidth <= 0 || totalDuration <= 0) return;
+    const touches = e.nativeEvent.touches;
+    if (touches.length === 0) return;
+    const stripX = getScrubZoneStripX(touches[0].pageX);
+    const t = xToTime(stripX);
+    onPlayheadChange(t);
+  };
+
+  const handleScrubZoneTouchEnd = () => {
+    if (!scrubZoneActiveRef.current) return;
+    scrubZoneActiveRef.current = false;
+    onScrubbingChange?.(false);
+    if (scrubStampHideTimeoutRef.current) clearTimeout(scrubStampHideTimeoutRef.current);
+    scrubStampHideTimeoutRef.current = setTimeout(() => {
+      scrubStampHideTimeoutRef.current = null;
+      Animated.timing(scrubStampOpacity, { toValue: 0, duration: 200, useNativeDriver: true }).start(
+        () => setShowScrubStamp(false)
+      );
+    }, 1000);
+  };
+
+  const handleScrubZoneTouchCancel = () => {
+    scrubZoneActiveRef.current = false;
+    onScrubbingChange?.(false);
+    if (scrubStampHideTimeoutRef.current) clearTimeout(scrubStampHideTimeoutRef.current);
+    scrubStampHideTimeoutRef.current = setTimeout(() => {
+      scrubStampHideTimeoutRef.current = null;
+      Animated.timing(scrubStampOpacity, { toValue: 0, duration: 200, useNativeDriver: true }).start(
+        () => setShowScrubStamp(false)
+      );
+    }, 1000);
+  };
+
+  useEffect(() => () => {
+    if (scrubStampHideTimeoutRef.current) clearTimeout(scrubStampHideTimeoutRef.current);
+    if (scrollTrackHideTimeoutRef.current) clearTimeout(scrollTrackHideTimeoutRef.current);
+    if (inertiaRafRef.current != null) cancelAnimationFrame(inertiaRafRef.current);
+  }, []);
 
   if (segments.length === 0 || totalDuration <= 0) return null;
 
@@ -582,6 +811,30 @@ export default function TimelineStrip({
           });
         }}
       >
+        <View
+          style={styles.scrubZone}
+          onTouchStart={handleScrubZoneTouchStart}
+          onTouchMove={handleScrubZoneTouchMove}
+          onTouchEnd={handleScrubZoneTouchEnd}
+          onTouchCancel={handleScrubZoneTouchCancel}
+        >
+          {showScrubStamp && (
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.scrubStamp,
+                {
+                  left: stripWidth > 0 ? timeToX(playheadTime) - timelineScrollX : 0,
+                  opacity: scrubStampOpacity,
+                },
+              ]}
+            >
+              <Text style={styles.scrubStampText} numberOfLines={1}>
+                {formatTime(playheadTime)}
+              </Text>
+            </Animated.View>
+          )}
+        </View>
         <ScrollView
           ref={timelineScrollRef}
           horizontal
@@ -603,6 +856,7 @@ export default function TimelineStrip({
               {segments.map((seg, i) => {
                 const isSelected = selectedSegmentIndex === i;
                 const blockWidth = stripLayout.blockWidths[i] ?? 0;
+                const isLast = i === segments.length - 1;
                 return (
                   <View
                     key={i}
@@ -613,27 +867,66 @@ export default function TimelineStrip({
                         borderRadius: BLOCK_BORDER_RADIUS,
                         borderWidth: isSelected ? 1 : 0,
                         borderLeftWidth: isSelected ? RESIZE_EDGE_WIDTH : 0,
-                        borderRightWidth: isSelected ? RESIZE_EDGE_WIDTH : 0,
+                        borderRightWidth: isSelected ? RESIZE_EDGE_WIDTH : isLast ? 0 : 1,
                         borderColor: "#6366f1",
+                        ...(isSelected ? {} : { borderRightColor: BLOCK_SEPARATOR_COLOR }),
                       },
                     ]}
                   >
                     <View
                       style={[
                         styles.thumbFrame,
-                        { flex: 1, borderRadius: BLOCK_BORDER_RADIUS },
+                        {
+                          flex: 1,
+                          borderRadius: isSelected ? 0 : BLOCK_BORDER_RADIUS,
+                          flexDirection: "row",
+                        },
                       ]}
                       pointerEvents="none"
                     >
-                      {thumbnailUris[i] ? (
-                        <Image
-                          source={{ uri: thumbnailUris[i]! }}
-                          style={[styles.thumbImage, { borderRadius: BLOCK_BORDER_RADIUS }]}
-                          resizeMode="cover"
-                        />
-                      ) : (
-                        <View style={styles.thumbPlaceholder} />
-                      )}
+                      {(() => {
+                        const frames = thumbnailFrameUris?.[i];
+                        if (frames?.length) {
+                          return frames.map((frameUri, j) => (
+                            <View
+                              key={j}
+                              style={[
+                                styles.thumbFrameSlice,
+                                { width: THUMB_WIDTH },
+                              ]}
+                            >
+                              {frameUri ? (
+                                <Image
+                                  source={{ uri: frameUri }}
+                                  style={[
+                                    styles.thumbFrameImage,
+                                    { borderRadius: 0 },
+                                  ]}
+                                  resizeMode="cover"
+                                />
+                              ) : (
+                                <View style={[styles.thumbPlaceholder, styles.thumbFrameSlicePlaceholder]} />
+                              )}
+                            </View>
+                          ));
+                        }
+                        if (thumbnailUris[i]) {
+                          return (
+                            <Image
+                              source={{ uri: thumbnailUris[i]! }}
+                              style={[
+                                styles.thumbImage,
+                                {
+                                  width: THUMB_WIDTH,
+                                  borderRadius: isSelected ? 0 : BLOCK_BORDER_RADIUS,
+                                },
+                              ]}
+                              resizeMode="cover"
+                            />
+                          );
+                        }
+                        return <View style={styles.thumbPlaceholder} />;
+                      })()}
                     </View>
                   </View>
                 );
@@ -652,10 +945,12 @@ export default function TimelineStrip({
           style={styles.scrollZone}
           onTouchStart={handleScrollZoneTouchStart}
           onTouchMove={handleScrollZoneTouchMove}
+          onTouchEnd={handleScrollZoneTouchEnd}
+          onTouchCancel={handleScrollZoneTouchCancel}
         />
         {maxTimelineScroll > 0 && (
-          <View
-            style={styles.scrollTrack}
+          <Animated.View
+            style={[styles.scrollTrack, { opacity: scrollTrackOpacity }]}
             onTouchStart={handleScrollTrackStart}
             onTouchMove={handleScrollTrackMove}
           >
@@ -676,7 +971,7 @@ export default function TimelineStrip({
                 })(),
               ]}
             />
-          </View>
+          </Animated.View>
         )}
       </View>
     </View>
@@ -697,6 +992,26 @@ const styles = StyleSheet.create({
   },
   sliderTime: { fontSize: 12, color: "#64748b", minWidth: 36, textAlign: "center" as const },
   timelineScrollView: { marginBottom: 4 },
+  scrubZone: {
+    height: SCRUB_ZONE_HEIGHT,
+    backgroundColor: "rgba(100, 116, 139, 0.08)",
+    marginBottom: 4,
+    position: "relative",
+  },
+  scrubStamp: {
+    position: "absolute",
+    bottom: 2,
+    transform: [{ translateX: "-50%" }],
+    backgroundColor: "rgba(99, 102, 241, 0.95)",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  scrubStampText: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#fff",
+  },
   timelineScrollViewInner: { height: STRIP_HEIGHT + 4 },
   scrollZone: {
     height: SCROLL_ZONE_HEIGHT,
@@ -704,18 +1019,18 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   scrollTrack: {
-    height: 28,
+    height: 14,
     marginTop: 4,
     paddingHorizontal: 8,
     justifyContent: "center",
     backgroundColor: "rgba(100, 116, 139, 0.15)",
-    borderRadius: 14,
+    borderRadius: 7,
   },
   scrollTrackThumb: {
     position: "absolute",
-    height: 20,
-    top: 4,
-    borderRadius: 10,
+    height: 10,
+    top: 2,
+    borderRadius: 5,
     backgroundColor: "#6366f1",
   },
   timelineScrollContent: { flexGrow: 0 },
@@ -738,14 +1053,36 @@ const styles = StyleSheet.create({
     backgroundColor: "#1e293b",
     minWidth: 4,
   },
+  thumbFrameSlice: {
+    minWidth: 2,
+    overflow: "hidden",
+    position: "relative",
+  },
   thumbImage: { width: "100%", height: "100%" },
+  thumbFrameImage: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: undefined,
+    height: undefined,
+  },
   thumbPlaceholder: {
     flex: 1,
     backgroundColor: "#334155",
     minHeight: STRIP_HEIGHT,
   },
+  thumbFrameSlicePlaceholder: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+  },
   selectedBlockWrapper: {
     position: "relative",
+    overflow: "hidden",
   },
   stripPlayhead: {
     position: "absolute",

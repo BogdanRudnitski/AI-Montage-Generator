@@ -18,6 +18,7 @@ export default function TimelineDemoScreen() {
   const [selectedSegmentIndex, setSelectedSegmentIndex] = useState<number | null>(null);
   const [timelineScrollX, setTimelineScrollX] = useState(0);
   const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
+  const [secondsPerViewport, setSecondsPerViewport] = useState(10);
   const [stripKey, setStripKey] = useState(0);
   const [resizeMode, setResizeMode] = useState<"moveCut" | "trim">("moveCut");
   const timelineScrollRef = useRef<ScrollView>(null);
@@ -91,6 +92,8 @@ export default function TimelineDemoScreen() {
         onTimelineViewportLayout={setTimelineViewportWidth}
         timelineScrollRef={timelineScrollRef}
         resizeMode={resizeMode}
+        secondsPerViewport={secondsPerViewport}
+        onSecondsPerViewportChange={setSecondsPerViewport}
       />
     </View>
   );

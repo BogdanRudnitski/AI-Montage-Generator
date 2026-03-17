@@ -400,13 +400,27 @@ ANALYZE_RESULT_FOR_PREVIEW_FILE = Path("uploads/analyze_result_for_preview.json"
 
 
 def _normalize_segment_for_preview(seg: dict) -> dict:
-    """Ensure segment has camelCase keys expected by frontend (same as export uses)."""
+    """Ensure segment has camelCase keys expected by frontend (same as export uses).
+    Always include clipStart and clipEnd (clip in/out) so 'which part of the clip is used' is never lost."""
+    start_time = float(seg.get("startTime", seg.get("start_time", 0)))
+    end_time = float(seg.get("endTime", seg.get("end_time", 0)))
+    segment_duration = max(0, end_time - start_time)
+    clip_start = seg.get("clipStart", seg.get("clip_start"))
+    clip_end = seg.get("clipEnd", seg.get("clip_end"))
+    if clip_start is None:
+        clip_start = 0.0
+    else:
+        clip_start = float(clip_start)
+    if clip_end is None:
+        clip_end = clip_start + segment_duration
+    else:
+        clip_end = float(clip_end)
     return {
-        "startTime": float(seg.get("startTime", seg.get("start_time", 0))),
-        "endTime": float(seg.get("endTime", seg.get("end_time", 0))),
+        "startTime": start_time,
+        "endTime": end_time,
         "clipFilename": str(seg.get("clipFilename", seg.get("clip_filename", ""))),
-        "clipStart": float(seg.get("clipStart", seg.get("clip_start", 0))),
-        "clipEnd": float(seg.get("clipEnd", seg.get("clip_end", 0))),
+        "clipStart": clip_start,
+        "clipEnd": clip_end,
     }
 
 
@@ -491,6 +505,7 @@ async def export_video(body: Optional[dict] = Body(None)):
             normalized = [_normalize_segment_for_preview(s) for s in raw]
             with open(segments_file, "w") as f:
                 json.dump(normalized, f, indent=2)
+            # normalized includes clipStart/clipEnd so clip in/out is preserved for export
         if not segments_file.exists():
             return {"success": False, "error": "segments.json not found. Call POST /analyze first or send segments in body."}
         env = os.environ.copy()

@@ -90,3 +90,21 @@ So:
 - **Drag left** (shrink segment 0): `newT` can be e.g. 8, so `T = 8` is valid → `next` has `seg[0].endTime = 8`, and that **does** get persisted when the parent runs `setSegments(next)`.
 
 Summary: the pipeline **does** compute and pass new start/end times; the parent **does** persist them when it runs `setSegments(next)`. In the demo, you only see a change when the clamp actually allows a different `T` (e.g. shrinking segment 0). Making the demo segments shorter (e.g. 0–5, 5–15, …) would let extending also change the stored times.
+
+---
+
+## 6. Clip in/out (internal start/end) – must be persisted
+
+**SegmentRecord** (and any persisted segment shape) must include **clip in/out** so we know which part of the source file is used:
+
+- **`clipStart`** – start time (seconds) within the source clip for this segment.
+- **`clipEnd`** – end time (seconds) within the source clip for this segment.
+
+**Rules:**
+
+1. **Save:** Any JSON or API that saves/loads segments must include `clipStart` and `clipEnd`. Do not drop them when writing `segments.json` or when sending segments in the export request body.
+2. **Load:** When reading segments (from analyze result, from `segments.json`, or from any API), always restore `clipStart` and `clipEnd`. If the stored format uses snake_case (`clip_start`, `clip_end`), normalize to camelCase. If `clipEnd` (or `clip_start`/`clip_end`) is missing, derive it as `clipStart + (endTime - startTime)` so the in-clip range matches the segment length.
+3. **Backend:** The backend’s `_normalize_segment_for_preview` (and any path that writes segments) must output the full segment shape including `clipStart` and `clipEnd`. Export writes the normalized segments to `segments.json`; clip_maker reads that file and uses `clipStart`/`clipEnd` for each segment when building the video.
+4. **Frontend:** Preview initializes segments from the analyze result and maps both `startTime`/`endTime` and `clipStart`/`clipEnd` (with snake_case fallbacks). Export sends the same `segments` state (including clip in/out) in the request body.
+
+So “which part of the clip is selected” is never lost across save/load, analyze, and export.

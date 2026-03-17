@@ -4,6 +4,65 @@ Build and test **one item at a time**. Each item is independent enough to ship a
 
 ---
 
+## 0. Resizable timeline scale (two-finger zoom in scroll zone)
+
+**Goal:** Make the timeline strip’s “zoom” (how many seconds one screen width represents) changeable via two-finger gestures in the area below the editing bar.
+
+- **Current behavior:** One finger in the scroll zone = pan left/right through the overflow (unchanged).
+- **New behavior in the same zone:**
+  - **Two fingers spread (apart):** “Zoom in” the timeline → fewer seconds per screen width → e.g. 5 sec = width of screen → strip appears longer, more detail.
+  - **Two fingers pinch (together):** “Zoom out” the timeline → more seconds per screen width → e.g. 20 sec = width of screen → strip appears shorter, more overview.
+
+- **Default:** 10 sec per viewport width (current `SECONDS_PER_VIEWPORT`).
+- **Bounds:** e.g. min 5 sec, max 20 sec (or 3–60) so the strip doesn’t become unusably long or short.
+
+**Implementation:**
+
+- **State:** Parent owns `secondsPerViewport` (number, default 10). TimelineStrip receives it as a prop (e.g. `secondsPerViewport?: number`) and uses it instead of the hardcoded constant to compute `stripWidth = (totalDuration / secondsPerViewport) * SCREEN_WIDTH`.
+- **Scroll zone:** Keep one-finger scroll. Add two-finger gesture handling: track two touches; on move, compute pinch vs spread (distance change). Spread → decrease `secondsPerViewport` (zoom in, clamp to min). Pinch → increase `secondsPerViewport` (zoom out, clamp to max). Call parent callback e.g. `onSecondsPerViewportChange(newValue)` so parent updates state and passes new prop.
+- **Optional:** Show current scale in UI (e.g. “5 s” / “10 s” / “20 s” per screen) for clarity.
+
+**Scope:** TimelineStrip (prop, stripWidth from prop, two-finger handling in scroll zone); parent state + callback in timeline-demo and preview.
+
+---
+
+## 0b. Scrub zone above strip (playhead control + time stamp)
+
+**Goal:** Separate "move playhead" from "resize clips" by adding a **small gesture zone above** the timeline strip. Scrubbing in that zone moves the time marker; the strip itself is used for clip selection and resize. A time stamp (e.g. `0:12`) appears above the playhead when the user scrubs there and fades out ~1 s after release.
+
+- **Current behavior:** Playhead is moved by dragging near the line on the strip (scrub), which competes with resize/selection on the same strip.
+- **New behavior:**
+  - **Zone above strip:** A thin area (about **one-quarter** of the height of the scroll zone below) sits **above** the timeline strip. One-finger horizontal drag in this zone **only** moves the playhead (same as current scrub logic, but in a dedicated region).
+  - **Time stamp:** When the user drags in that zone, a small label showing the current time (e.g. `0:12`) appears **above** the playhead line, inside that zone. It fades in when scrubbing starts and fades out roughly **1 second** after the user releases, so it's usually hidden and only visible during/just after scrubbing.
+
+**Implementation:**
+
+- **Layout:** Add a "scrub zone" `View` above the timeline `ScrollView` (same horizontal span as the viewport). Height = e.g. `SCROLL_ZONE_HEIGHT / 4` (smaller than the zone below).
+- **Gestures:** In the scrub zone: `onTouchStart` → set scrubbing, show time stamp; `onTouchMove` → convert touch X to time (same as strip: `pageX - viewportLeft + timelineScrollX` → strip X → `xToTime(stripX)`), call `onPlayheadChange(t)`; `onTouchEnd` / `onTouchCancel` → clear scrubbing, start 1 s timer to hide time stamp.
+- **Time stamp:** A label (e.g. `formatTime(playheadTime)`) positioned above the playhead (same X as the playhead line in viewport coords: `timeToX(playheadTime) - timelineScrollX`), centered on that X. Use opacity/Animated to fade in when scrubbing starts and fade out ~1 s after release.
+- **Viewport height:** Increase the timeline viewport's min height by the scrub zone height so layout stays correct.
+
+**Scope:** TimelineStrip only (new scrub zone View, touch handlers, time stamp state + animation). No parent API changes.
+
+---
+
+## 0c. Multi-frame thumbnails per clip (TikTok / iPhone style)
+
+**Goal:** Show multiple thumbnail frames inside each clip rectangle instead of one large frame, so the strip reflects the clip's content over time (like TikTok or iPhone timeline).
+
+- **Current behavior:** One thumbnail per segment (single frame, e.g. at clip start).
+- **New behavior:** Each clip block displays a horizontal strip of small frames spaced roughly by timestamp (start to end of the clip). Frame count can be fixed (e.g. 6–12) or derived from segment length; frames are evenly spaced in the clip's time range.
+
+**Implementation:**
+
+- **TimelineStrip:** Add optional prop `thumbnailFrameUris?: (string | null)[][]`. For each segment `i`, if `thumbnailFrameUris[i]` exists and has length > 0, render the block as a row of `Image` components with equal width (each frame one slice). Otherwise fall back to existing single `thumbnailUris[i]` (one image for the whole block).
+- **Preview (or any parent that has video):** When generating thumbnails, for each segment call `getThumbnailAsync` at several times (e.g. 8) evenly spaced between `clipStart` and `clipEnd`. Store result as `(string | null)[][]` and pass as `thumbnailFrameUris`. Keep `thumbnailUris` as fallback (e.g. first frame of each segment) so TimelineStrip can work with or without multi-frame data.
+- **Constants:** Use a small max frame count per clip (e.g. 8 or 12) to limit work and layout; ensure minimum 1 frame width so very narrow blocks don't break.
+
+**Scope:** TimelineStrip (new prop, conditional layout per block); preview (or timeline-demo) thumbnail generation loop to produce multiple frames per segment.
+
+---
+
 ## 1. Alternative resize model: “Move cut” vs “Trim” (default = move cut)
 
 **Goal:** Two resize behaviors, with **move cut** as the default.
@@ -90,6 +149,8 @@ Build and test **one item at a time**. Each item is independent enough to ship a
 
 | Order | Item | Depends on |
 |-------|------|------------|
+| 0 | Resizable timeline scale (two-finger zoom in scroll zone) | — |
+| 0b | Scrub zone above strip (playhead + time stamp) | — |
 | 1 | Move cut vs Trim + toggle | — |
 | 2 | Clip in/out in JSON / data model | — |
 | 3 | Music persistence & library | — |
@@ -98,4 +159,4 @@ Build and test **one item at a time**. Each item is independent enough to ship a
 | 6 | Replace + selection modal (frame strip) | 5 |
 | 7 | Alter selection (same modal) | 6 (reuse modal) |
 
-Recommend building in this order so that (6) and (7) reuse the same modal and frame-strip component.
+Recommend building in this order: do **0** first (zoom in scroll zone), then continue with 1–7 so that (6) and (7) reuse the same modal and frame-strip component.
