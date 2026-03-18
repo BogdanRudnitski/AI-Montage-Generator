@@ -17,7 +17,7 @@ ANALYZE_RESULT_PATH = os.path.join(UPLOADS_DIR, "analyze_result.json")
 SEGMENTS_PATH = os.path.join(UPLOADS_DIR, "segments.json")
 
 # Import clip_maker components (no heavy deps for ClipManager + compute_segments_only)
-from clip_maker import ClipManager, compute_segments_only, MAX_DURATION
+from clip_maker import ClipManager, compute_segments_only, MAX_DURATION, DEFAULT_MIN_CLIP_DURATION
 
 
 def main():
@@ -33,12 +33,17 @@ def main():
     songs = list(results.keys())
     print(f"[TRACE] compute_segments.py: audio_analysis.json keys (songs) = {songs}")
     target_song = None
+    min_clip_duration = DEFAULT_MIN_CLIP_DURATION
+    max_clip_duration = None
     if os.path.exists(OPTIONS_FILE):
         try:
             with open(OPTIONS_FILE, "r") as f:
                 opts = json.load(f)
                 target_song = opts.get("song_filename")
-            print(f"[TRACE] compute_segments.py: OPTIONS_FILE={OPTIONS_FILE} opts.song_filename={target_song!r}")
+                min_clip_duration = float(opts.get("minClipDuration", min_clip_duration))
+                if opts.get("maxClipDuration") is not None:
+                    max_clip_duration = float(opts["maxClipDuration"])
+            print(f"[TRACE] compute_segments.py: OPTIONS_FILE={OPTIONS_FILE} opts.song_filename={target_song!r} min_clip={min_clip_duration} max_clip={max_clip_duration}")
         except Exception as e:
             print(f"[TRACE] compute_segments.py: failed to read options: {e}")
     selected_song = target_song if target_song and target_song in songs else songs[0]
@@ -66,7 +71,10 @@ def main():
     if not clip_manager.clips:
         print("Error: No video clips in uploads/media.")
         sys.exit(1)
-    segments = compute_segments_only(cut_points, duration, clip_manager, max_duration=max_dur)
+    segments = compute_segments_only(
+        cut_points, duration, clip_manager, max_duration=max_dur,
+        min_clip_duration=min_clip_duration, max_clip_duration=max_clip_duration,
+    )
     bpm = float(data.get("bpm", 0))
     analyze_result = {
         "duration": round(duration, 3),

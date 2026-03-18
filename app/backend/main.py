@@ -332,7 +332,7 @@ async def upload_song(
     def parse_bool(value: str) -> bool:
         return value.lower() in ('true', '1', 'yes')
     
-    # Save options.json with all parameters
+    # Save options.json (AI reads minClipDuration/maxClipDuration for segment generation)
     options_data = {
         "max_duration": int(max_duration),
         "density": density,
@@ -341,7 +341,9 @@ async def upload_song(
         "focus_vocals": parse_bool(focus_vocals),
         "focus_repetitions": parse_bool(focus_repetitions),
         "sync_to_grid": parse_bool(sync_to_grid),
-        "song_filename": song.filename
+        "song_filename": song.filename,
+        "minClipDuration": 0.1,
+        "maxClipDuration": None,
     }
     options_path = "uploads/options.json"
     with open(options_path, "w") as f:
@@ -425,6 +427,8 @@ async def upload_media(
     if song_saved:
         options_data["song_filename"] = song_saved
         
+    options_data["minClipDuration"] = 0.1
+    options_data["maxClipDuration"] = None
     options_path = "uploads/options.json"
     with open(options_path, "w") as f:
         json.dump(options_data, f, indent=2)
