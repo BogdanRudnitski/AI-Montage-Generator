@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, Body
+from fastapi import FastAPI, UploadFile, File, Form, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -6,6 +6,8 @@ import os
 import shutil
 import json
 import re
+import hashlib
+import tempfile
 from typing import List, Optional
 from pathlib import Path
 from urllib.parse import unquote
@@ -22,7 +24,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ensure upload directories exist
+# Ensure upload directories exist (media = normalized MP4 clips only; see MEDIA_DIR below)
 os.makedirs("uploads/media", exist_ok=True)
 os.makedirs("uploads/songs", exist_ok=True)
 os.makedirs("uploads/final_videos", exist_ok=True)
@@ -33,18 +35,34 @@ app.mount("/files/songs", StaticFiles(directory="uploads/songs"), name="songs")
 app.mount("/files/final_videos", StaticFiles(directory="uploads/final_videos"), name="final_videos")
 
 # -------------------------
-# MEDIA NAMING A, B, C (by upload order for segment-to-clip matching)
-# Data flow: upload saves as A.ext, B.ext → analyze/compute_segments use filenames from
-# uploads/media → segment clipFilename matches frontend filename so preview/export find the clip.
+# MEDIA: STABLE DETERMINISTIC NAMING, ORIGINAL FORMAT STORED
+# Videos are stored as uploads/media/{stable_id}{original_extension} (e.g. abc123.mov, def456.mp4).
+# No transcoding or conversion: save exactly as received for fast uploads.
+# Stable ID = deterministic from (original_filename + file_size). clipFilename = actual stored filename.
 # -------------------------
 MEDIA_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v')
+MEDIA_DIR = "uploads/media"
 
-def _next_media_basename(upload_dir: str, offset: int = 0) -> str:
-    """Return next basename (A, B, C, ...) by existing file count + offset. Used so clipFilename matches frontend."""
-    os.makedirs(upload_dir, exist_ok=True)
-    existing = [f for f in os.listdir(upload_dir) if f.lower().endswith(MEDIA_EXTENSIONS)]
-    idx = len(existing) + offset
-    return chr(ord('A') + idx) if idx < 26 else f"clip_{idx}"
+
+def media_stable_id(original_filename: str, file_size_bytes: int) -> str:
+    """
+    Single shared sanitization: same input always produces the same stable ID (no extension).
+    Deterministic, collision-safe. Stored filename = stable_id + original_extension.
+    """
+    base = (original_filename or "unnamed").strip()
+    name, ext = os.path.splitext(base)
+    slug = re.sub(r"[^\w\-.]", "_", name.lower())[:80].strip("_") or "clip"
+    hash_input = f"{original_filename}:{file_size_bytes}"
+    hash_part = hashlib.sha256(hash_input.encode()).hexdigest()[:12]
+    return f"{slug}_{hash_part}"
+
+
+def _original_extension(raw_filename: str) -> str:
+    """Preserve original extension for stored file; default .mp4 if missing/invalid."""
+    ext = os.path.splitext((raw_filename or "").strip())[1].lower()
+    if ext and ext in MEDIA_EXTENSIONS:
+        return ext
+    return ".mp4"
 
 # -------------------------
 # FILENAME SANITIZATION
@@ -208,10 +226,10 @@ def compress_video(video_path: str) -> str:
 # -------------------------
 @app.post("/clear-uploads")
 async def clear_uploads():
-    """Clear all media files (not songs)"""
+    """Clear all media files (not songs). Homepage uses this for new session before re-upload."""
     try:
-        shutil.rmtree("uploads/media", ignore_errors=True)
-        os.makedirs("uploads/media", exist_ok=True)
+        shutil.rmtree(MEDIA_DIR, ignore_errors=True)
+        os.makedirs(MEDIA_DIR, exist_ok=True)
         print("✓ Cleared uploads/media folder")
         return {"success": True, "message": "Media folder cleared"}
     except Exception as e:
@@ -219,36 +237,71 @@ async def clear_uploads():
         return {"success": False, "error": str(e)}
 
 # -------------------------
-# UPLOAD SINGLE FILE
+# UPLOAD SINGLE FILE (session upload or preview replacement)
+# Save as received: no transcoding, no ffmpeg. Stored as {stable_id}{original_extension}.
+# Session (homepage): deduplicate=False → always save. Preview replace: deduplicate=True → reuse if exists.
 # -------------------------
 @app.post("/upload-single")
-async def upload_single_file(files: List[UploadFile] = File(...)):
-    """Upload media with names A.ext, B.ext, ... by order so segment clipFilename matches."""
+async def upload_single_file(
+    files: List[UploadFile] = File(...),
+    deduplicate: str = Form("false"),
+):
+    dedupe = deduplicate.strip().lower() in ("true", "1", "yes")
     saved_files = []
-    media_dir = "uploads/media"
-    os.makedirs(media_dir, exist_ok=True)
-    existing_count = len([f for f in os.listdir(media_dir) if f.lower().endswith(MEDIA_EXTENSIONS)])
+    os.makedirs(MEDIA_DIR, exist_ok=True)
 
-    for i, f in enumerate(files):
-        idx = existing_count + i
-        base = chr(ord('A') + idx) if idx < 26 else f"clip_{idx}"
-        raw = f.filename or "unnamed"
-        ext = os.path.splitext(raw)[1]
-        if not ext or ext.lower() not in (e for e in MEDIA_EXTENSIONS):
-            ext = ".mp4"
-        name = base + ext
-        save_path = f"{media_dir}/{name}"
+    for f in files:
+        raw = (f.filename or "unnamed").strip()
+        ext = _original_extension(raw)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            shutil.copyfileobj(f.file, tmp)
+            tmp_path = tmp.name
+        try:
+            file_size = os.path.getsize(tmp_path)
+            stable_id = media_stable_id(raw, file_size)
+            final_name = stable_id + ext
+            final_path = os.path.join(MEDIA_DIR, final_name)
 
-        with open(save_path, "wb") as buffer:
-            shutil.copyfileobj(f.file, buffer)
-        print(f"Saved: {save_path}")
+            if dedupe and os.path.isfile(final_path):
+                print(f"[TRACE] upload-single dedupe: reusing existing {final_name}")
+                saved_files.append(final_name)
+                continue
 
-        if save_path.lower().endswith(('.mp4', '.mov', '.m4v', '.avi', '.mkv')):
-            save_path = compress_video(save_path)
-        saved_files.append(Path(save_path).name)
-        existing_count += 1
+            shutil.copy2(tmp_path, final_path)
+            print(f"Saved (as received): {final_path}")
+            saved_files.append(final_name)
+        finally:
+            if os.path.isfile(tmp_path):
+                os.unlink(tmp_path)
 
     return {"success": True, "files_saved": saved_files}
+
+
+# -------------------------
+# STABLE ID + EXISTS (for preview replacement: verify before uploading)
+# Same media_stable_id() used here so frontend can ask "does this exact video exist?" by identity.
+# -------------------------
+@app.post("/media-stable-id")
+async def get_media_stable_id(body: dict = Body(...)):
+    """Return stable_id and stored filename (stable_id + original extension) for given filename + file_size."""
+    filename = (body.get("filename") or body.get("original_filename") or "unnamed").strip()
+    file_size = int(body.get("file_size") or body.get("file_size_bytes") or 0)
+    stable_id = media_stable_id(filename, file_size)
+    ext = _original_extension(filename)
+    return {"stable_id": stable_id, "filename": stable_id + ext}
+
+
+@app.get("/media/exists")
+async def media_exists(stable_id: str = Query(..., alias="stable_id")):
+    """Check if a clip with this stable ID already exists (any stored extension). Returns actual filename if exists."""
+    media_path = Path(MEDIA_DIR)
+    if not media_path.is_dir():
+        return {"exists": False, "filename": None}
+    for f in media_path.iterdir():
+        if f.is_file() and f.suffix.lower() in MEDIA_EXTENSIONS and f.stem == stable_id:
+            return {"exists": True, "filename": f.name}
+    return {"exists": False, "filename": None}
+
 
 # -------------------------
 # UPLOAD SONG (NO COMPRESSION)
@@ -303,7 +356,7 @@ async def upload_song(
     }
 
 # -------------------------
-# OLD UPLOAD ENDPOINT (KEPT FOR COMPATIBILITY)
+# BATCH UPLOAD (legacy): stable ID + original extension, save as received. Clear media first.
 # -------------------------
 @app.post("/upload")
 async def upload_media(
@@ -317,32 +370,29 @@ async def upload_media(
     focus_repetitions: str = Form("true"),
     sync_to_grid: str = Form("false")
 ):
-    # Clear previous uploads
-    shutil.rmtree("uploads/media", ignore_errors=True)
+    shutil.rmtree(MEDIA_DIR, ignore_errors=True)
     shutil.rmtree("uploads/songs", ignore_errors=True)
-    os.makedirs("uploads/media", exist_ok=True)
+    os.makedirs(MEDIA_DIR, exist_ok=True)
     os.makedirs("uploads/songs", exist_ok=True)
-
     saved_files = []
-    media_dir = "uploads/media"
 
-    for i, f in enumerate(files):
-        base = chr(ord('A') + i) if i < 26 else f"clip_{i}"
-        raw = f.filename or "unnamed"
-        ext = os.path.splitext(raw)[1]
-        if not ext or ext.lower() not in (e for e in MEDIA_EXTENSIONS):
-            ext = ".mp4"
-        name = base + ext
-        save_path = f"{media_dir}/{name}"
-
-        print(f"Original filename: {f.filename} → saving as {name}")
-        with open(save_path, "wb") as buffer:
-            shutil.copyfileobj(f.file, buffer)
-        print(f"Saved: {save_path}")
-
-        if save_path.lower().endswith(('.mp4', '.mov', '.m4v', '.avi', '.mkv')):
-            save_path = compress_video(save_path)
-        saved_files.append(Path(save_path).name)
+    for f in files:
+        raw = (f.filename or "unnamed").strip()
+        ext = _original_extension(raw)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            shutil.copyfileobj(f.file, tmp)
+            tmp_path = tmp.name
+        try:
+            file_size = os.path.getsize(tmp_path)
+            stable_id = media_stable_id(raw, file_size)
+            final_name = stable_id + ext
+            final_path = os.path.join(MEDIA_DIR, final_name)
+            shutil.copy2(tmp_path, final_path)
+            print(f"Saved (as received): {final_path}")
+            saved_files.append(final_name)
+        finally:
+            if os.path.isfile(tmp_path):
+                os.unlink(tmp_path)
 
     song_saved = None
     if song:

@@ -125,6 +125,7 @@ export default function ExploreScreen() {
     };
   }, [generateLoading]);
 
+  // Session upload: always re-upload selected videos (deduplicate=false). Backend returns stable_id.mp4.
   async function uploadSingleFile(file: MediaItem, index: number): Promise<{ success: boolean; serverFilename?: string }> {
     const formData = new FormData();
     const name = file.filename || `file_${index}.${file.type === "video" ? "mp4" : "jpg"}`;
@@ -133,6 +134,7 @@ export default function ExploreScreen() {
       name,
       type: file.type === "video" ? "video/mp4" : "image/jpeg",
     } as any);
+    formData.append("deduplicate", "false"); // Homepage: always save; backend normalizes to MP4 + stable ID
 
     try {
       const res = await fetch(`${SERVER_URL}/upload-single`, {
@@ -197,24 +199,22 @@ export default function ExploreScreen() {
         uploaded: false,
       }));
 
-      const shouldAppend = mediaList.length > 0;
-      
-      if (shouldAppend) {
-        const startIndex = mediaList.length;
-        setMediaList(prev => [...prev, ...newFiles]);
-        // Upload in parallel
-        uploadMediaInParallel(newFiles, startIndex);
-      } else {
+      // New session: clear backend media then upload all. Always re-upload for the new session.
+      const isNewSession = mediaList.length === 0;
+      if (isNewSession) {
         try {
-          await fetch(`${SERVER_URL}/clear-uploads`, {
-            method: "POST",
-          });
+          await fetch(`${SERVER_URL}/clear-uploads`, { method: "POST" });
         } catch (err) {
           console.error("Failed to clear uploads:", err);
         }
+      }
+      if (isNewSession) {
         setMediaList(newFiles);
-        // Upload in parallel
         uploadMediaInParallel(newFiles, 0);
+      } else {
+        const startIndex = mediaList.length;
+        setMediaList((prev) => [...prev, ...newFiles]);
+        uploadMediaInParallel(newFiles, startIndex);
       }
     }
   }

@@ -32,6 +32,12 @@ export interface ClipSelectionModalProps {
   segmentDurationSec: number;
   onConfirm: (clipStart: number, clipEnd: number) => void;
   onCancel: () => void;
+  /** Confirm button enabled only when replacement clip is uploaded to backend. */
+  canConfirm?: boolean;
+  /** Show uploading state on confirm button. */
+  uploading?: boolean;
+  /** Error message from upload (optional). */
+  uploadError?: string | null;
 }
 
 export default function ClipSelectionModal({
@@ -40,6 +46,9 @@ export default function ClipSelectionModal({
   segmentDurationSec,
   onConfirm,
   onCancel,
+  canConfirm = true,
+  uploading = false,
+  uploadError = null,
 }: ClipSelectionModalProps) {
   const videoRef = useRef<Video>(null);
   const [videoDurationSec, setVideoDurationSec] = useState<number | null>(null);
@@ -133,6 +142,9 @@ export default function ClipSelectionModal({
         onConfirm={handleConfirm}
         onCancel={onCancel}
         tooShort={tooShort}
+        canConfirm={canConfirm}
+        uploading={uploading}
+        uploadError={uploadError}
       />
     </Modal>
   );
@@ -151,6 +163,9 @@ function ClipSelectionModalInner({
   onConfirm,
   onCancel,
   tooShort,
+  canConfirm,
+  uploading,
+  uploadError,
 }: {
   videoDurationSec: number | null;
   segmentDurationSec: number;
@@ -164,6 +179,9 @@ function ClipSelectionModalInner({
   onConfirm: () => void;
   onCancel: () => void;
   tooShort: boolean;
+  canConfirm: boolean;
+  uploading: boolean;
+  uploadError: string | null;
 }) {
   const maxSelectionStartRef = useRef(maxSelectionStart);
   const videoDurationSecRef = useRef(videoDurationSec);
@@ -244,6 +262,9 @@ function ClipSelectionModalInner({
                 Video is shorter than the segment; only the available range will be used.
               </Text>
             )}
+            {uploadError ? (
+              <Text style={styles.uploadError}>{uploadError}</Text>
+            ) : null}
           </>
         )}
 
@@ -252,11 +273,15 @@ function ClipSelectionModalInner({
             <Text style={styles.cancelButtonText}>Cancel</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.confirmButton, loading && styles.confirmButtonDisabled]}
+            style={[styles.confirmButton, (loading || !canConfirm || uploading) && styles.confirmButtonDisabled]}
             onPress={onConfirm}
-            disabled={loading}
+            disabled={loading || !canConfirm || uploading}
           >
-            <Text style={styles.confirmButtonText}>Use selection</Text>
+            {uploading ? (
+              <Text style={styles.confirmButtonText}>Uploading…</Text>
+            ) : (
+              <Text style={styles.confirmButtonText}>Use selection</Text>
+            )}
           </TouchableOpacity>
         </View>
       </View>
@@ -318,6 +343,7 @@ const styles = StyleSheet.create({
   },
   timeLabel: { fontSize: 12, color: "#64748b", marginTop: 8, textAlign: "center" },
   warning: { fontSize: 12, color: "#b45309", marginTop: 6, textAlign: "center" },
+  uploadError: { fontSize: 12, color: "#dc2626", marginTop: 8, textAlign: "center" },
   buttons: {
     flexDirection: "row",
     justifyContent: "flex-end",

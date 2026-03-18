@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { View, Text, TouchableOpacity, StyleSheet, Alert, ScrollView, Dimensions } from "react-native";
+import { View, Text, TouchableOpacity, StyleSheet, Alert, Platform } from "react-native";
 import { Video, ResizeMode } from "expo-av";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import * as Sharing from "expo-sharing";
@@ -8,33 +8,22 @@ import * as MediaLibrary from "expo-media-library";
 import { Ionicons } from "@expo/vector-icons";
 import { SERVER_URL } from "../config";
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const SAFE_TOP = Platform.OS === "ios" ? 52 : 44;
+const BOTTOM_BAR_HEIGHT = 96;
 
 export default function ResultScreen() {
   const router = useRouter();
   const params = useLocalSearchParams();
   const [saving, setSaving] = useState(false);
   const [sharing, setSharing] = useState(false);
-  const [videoSize, setVideoSize] = useState({ width: 0, height: 0 });
   const [downloadedFileUri, setDownloadedFileUri] = useState<string | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
   const videoRef = React.useRef<Video>(null);
-  const hasInitialized = React.useRef(false); // Track if already initialized
 
   const videoUrl = params.videoUrl as string;
   const videoName = params.videoName as string;
-  
-  // URL encode the path to handle spaces and special characters
-  const encodedVideoUrl = videoUrl ? encodeURI(videoUrl) : '';
+  const encodedVideoUrl = videoUrl ? encodeURI(videoUrl) : "";
   const fullVideoUrl = `${SERVER_URL}${encodedVideoUrl}`;
-
-  console.log("====== RESULT SCREEN DEBUG ======");
-  console.log("Params received:", params);
-  console.log("Video URL param:", videoUrl);
-  console.log("Encoded Video URL:", encodedVideoUrl);
-  console.log("Video Name param:", videoName);
-  console.log("Full Video URL:", fullVideoUrl);
-  console.log("================================");
 
   // Pre-download video for instant save/share
   React.useEffect(() => {
@@ -163,131 +152,52 @@ export default function ResultScreen() {
     router.replace("/");
   }
 
-  async function toggleFullscreen() {
-    if (videoRef.current) {
-      try {
-        await videoRef.current.presentFullscreenPlayer();
-      } catch (error) {
-        console.error("Fullscreen error:", error);
-      }
-    }
-  }
-
   return (
     <View style={styles.container}>
-      <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
-        <View style={styles.header}>
-          <TouchableOpacity 
-            style={styles.backButton}
-            onPress={createNew}
-            activeOpacity={0.7}
-          >
-            <Ionicons name="arrow-back" size={24} color="#fff" />
-          </TouchableOpacity>
-          <View>
-            <Text style={styles.headerTitle}>Your Video</Text>
-            <Text style={styles.headerSubtitle}>Ready to share!</Text>
-          </View>
-        </View>
-
-        <TouchableOpacity 
-          activeOpacity={1} 
-          onPress={toggleFullscreen}
-          style={styles.videoTouchable}
+      <View style={styles.videoWrapper}>
+        <Video
+          ref={videoRef}
+          source={{ uri: fullVideoUrl }}
+          style={StyleSheet.absoluteFill}
+          useNativeControls
+          resizeMode={ResizeMode.CONTAIN}
+          shouldPlay
+          isLooping
+          onError={(e) => {
+            console.error("Video error:", e);
+            Alert.alert("Video Error", "Could not load video. Check server connection.");
+          }}
+        />
+        <TouchableOpacity
+          style={styles.backOverlay}
+          onPress={createNew}
+          activeOpacity={0.8}
         >
-          <Video
-            ref={videoRef}
-            source={{ uri: fullVideoUrl }}
-            style={[
-              styles.video,
-              videoSize.width && videoSize.height && {
-                height: (SCREEN_WIDTH * videoSize.height) / videoSize.width
-              }
-            ]}
-            useNativeControls
-            resizeMode={ResizeMode.CONTAIN}
-            shouldPlay
-            isLooping
-            onError={(error) => {
-              console.error("Video error:", error);
-              Alert.alert("Video Error", "Could not load video. Check server connection.");
-            }}
-            onLoad={(status) => {
-              console.log("Video loaded successfully");
-              if (status.isLoaded && status.naturalSize) {
-                setVideoSize({
-                  width: status.naturalSize.width,
-                  height: status.naturalSize.height
-                });
-                console.log("Video dimensions:", status.naturalSize);
-              }
-            }}
-          />
+          <Ionicons name="arrow-back" size={26} color="#fff" />
         </TouchableOpacity>
+      </View>
 
-        <View style={styles.actionsContainer}>
-          <View style={styles.infoCard}>
-            <View style={styles.infoRow}>
-              <View style={styles.infoIconBg}>
-                <Text style={styles.infoIcon}>🎬</Text>
-              </View>
-              <View style={styles.infoText}>
-                <Text style={styles.infoTitle} numberOfLines={1}>{videoName}</Text>
-                <Text style={styles.infoSubtitle}>AI-generated montage</Text>
-              </View>
-            </View>
-          </View>
-
-          <View style={styles.buttonRow}>
-            <TouchableOpacity
-              style={styles.saveButton}
-              onPress={saveToGallery}
-              disabled={saving}
-              activeOpacity={0.8}
-            >
-              <View style={styles.buttonContent}>
-                {saving ? (
-                  <Text style={styles.buttonIcon}>⏳</Text>
-                ) : (
-                  <Ionicons name="download-outline" size={28} color="#fff" />
-                )}
-                <Text style={styles.buttonText}>
-                  {saving ? "Saving..." : "Save"}
-                </Text>
-              </View>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.shareButton}
-              onPress={shareVideo}
-              disabled={sharing}
-              activeOpacity={0.8}
-            >
-              <View style={styles.buttonContent}>
-                {sharing ? (
-                  <Text style={styles.buttonIcon}>⏳</Text>
-                ) : (
-                  <Ionicons name="share-outline" size={28} color="#fff" />
-                )}
-                <Text style={styles.buttonText}>
-                  {sharing ? "Preparing..." : "Share"}
-                </Text>
-              </View>
-            </TouchableOpacity>
-          </View>
-
-          <TouchableOpacity
-            style={styles.newButton}
-            onPress={createNew}
-            activeOpacity={0.8}
-          >
-            <Ionicons name="add-circle-outline" size={24} color="#6366f1" />
-            <Text style={styles.newButtonText}>Create New Video</Text>
-          </TouchableOpacity>
-        </View>
-        
-        <View style={{ height: 40 }} />
-      </ScrollView>
+      {/* Bottom bar: Download + Share */}
+      <View style={styles.bottomBar}>
+        <TouchableOpacity
+          style={[styles.bottomButton, styles.downloadButton]}
+          onPress={saveToGallery}
+          disabled={saving}
+          activeOpacity={0.85}
+        >
+          <Ionicons name="download-outline" size={24} color="#fff" />
+          <Text style={styles.bottomButtonText}>{saving ? "Saving…" : "Save"}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.bottomButton, styles.shareButton]}
+          onPress={shareVideo}
+          disabled={sharing}
+          activeOpacity={0.85}
+        >
+          <Ionicons name="share-outline" size={24} color="#fff" />
+          <Text style={styles.bottomButtonText}>{sharing ? "Preparing…" : "Share"}</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
@@ -295,156 +205,63 @@ export default function ResultScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#f5f7fb",
+    backgroundColor: "#000",
   },
-  scrollView: {
+  videoWrapper: {
     flex: 1,
+    position: "relative",
   },
-  header: {
-    backgroundColor: "#6366f1",
-    paddingTop: 60,
-    paddingBottom: 24,
-    paddingHorizontal: 24,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 16,
-  },
-  backButton: {
+  backOverlay: {
+    position: "absolute",
+    top: SAFE_TOP,
+    left: 16,
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    backgroundColor: "rgba(0,0,0,0.45)",
     justifyContent: "center",
     alignItems: "center",
   },
-  headerTitle: {
-    fontSize: 28,
-    fontWeight: "900",
-    color: "#fff",
-    marginBottom: 4,
-    letterSpacing: -0.5,
-  },
-  headerSubtitle: {
-    fontSize: 15,
-    color: "rgba(255, 255, 255, 0.95)",
-    fontWeight: "600",
-  },
-  videoTouchable: {
-    width: "100%",
-    backgroundColor: "#000",
-  },
-  video: {
-    width: "100%",
-    minHeight: 200,
-    backgroundColor: "#000",
-  },
-  actionsContainer: {
-    paddingHorizontal: 24,
-    paddingTop: 24,
-  },
-  infoCard: {
-    backgroundColor: "#fff",
-    borderRadius: 20,
-    padding: 20,
-    marginBottom: 24,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 14,
-    elevation: 3,
-  },
-  infoRow: {
+  bottomBar: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 16,
-  },
-  infoIconBg: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: "#eef2ff",
     justifyContent: "center",
-    alignItems: "center",
-  },
-  infoIcon: {
-    fontSize: 28,
-  },
-  infoText: {
-    flex: 1,
-  },
-  infoTitle: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: "#0f172a",
-    marginBottom: 4,
-  },
-  infoSubtitle: {
-    fontSize: 14,
-    color: "#64748b",
-    fontWeight: "600",
-  },
-  buttonRow: {
-    flexDirection: "row",
     gap: 12,
-    marginBottom: 16,
+    height: BOTTOM_BAR_HEIGHT,
+    paddingHorizontal: 20,
+    paddingBottom: Platform.OS === "ios" ? 28 : 20,
+    backgroundColor: "rgba(0,0,0,0.7)",
   },
-  saveButton: {
-    flex: 1,
+  bottomButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 999,
+    minWidth: 120,
+  },
+  downloadButton: {
     backgroundColor: "#10b981",
-    borderRadius: 16,
-    paddingVertical: 18,
     shadowColor: "#10b981",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 5,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    elevation: 4,
   },
   shareButton: {
-    flex: 1,
     backgroundColor: "#6366f1",
-    borderRadius: 16,
-    paddingVertical: 18,
     shadowColor: "#6366f1",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    elevation: 5,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    elevation: 4,
   },
-  buttonContent: {
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-  },
-  buttonIcon: {
-    fontSize: 28,
-  },
-  buttonText: {
+  bottomButtonText: {
     color: "#fff",
     fontSize: 16,
-    fontWeight: "800",
-    letterSpacing: -0.3,
-  },
-  newButton: {
-    backgroundColor: "#fff",
-    borderRadius: 16,
-    paddingVertical: 18,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-    borderWidth: 2,
-    borderColor: "#e2e8f0",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  newButtonText: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: "#6366f1",
-    letterSpacing: -0.3,
+    fontWeight: "700",
+    letterSpacing: 0.2,
   },
 });

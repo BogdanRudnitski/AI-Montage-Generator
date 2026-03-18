@@ -17,17 +17,10 @@ import TimelineStrip from "../components/TimelineStrip";
 import ClipSelectionModal from "../components/ClipSelectionModal";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
-const PREVIEW_AREA_HEIGHT = Math.round(SCREEN_HEIGHT * 0.38);
-const PREVIEW_CARD_WIDTH_RATIO = 0.6;
 const PREVIEW_ASPECT_RATIO = 9 / 16;
-const PREVIEW_CARD_BORDER_RADIUS = 28;
-const PREVIEW_MARGIN_H = 24;
-const PREVIEW_MARGIN_V = 12;
-const PREVIEW_WIDTH = Math.round(SCREEN_WIDTH * PREVIEW_CARD_WIDTH_RATIO);
-const PREVIEW_HEIGHT = Math.min(
-  Math.round(PREVIEW_WIDTH / PREVIEW_ASPECT_RATIO),
-  PREVIEW_AREA_HEIGHT - PREVIEW_MARGIN_V * 2
-);
+const PREVIEW_CARD_BORDER_RADIUS = 16;
+const PREVIEW_MARGIN_H = 20;
+const PREVIEW_MARGIN_V = 16;
 const STRIP_HEIGHT = 48;
 const BLOCK_GAP = 4;
 const BLOCK_BORDER_RADIUS = 6;
@@ -125,7 +118,18 @@ export default function PreviewScreen() {
   const [isPlaying, setIsPlaying] = useState(true);
   const [playbackEnded, setPlaybackEnded] = useState(false);
   const [selectedSegmentIndex, setSelectedSegmentIndex] = useState<number | null>(null);
-  const [replaceSelectionPending, setReplaceSelectionPending] = useState<{ uri: string; filename: string } | null>(null);
+  const [replaceSelectionPending, setReplaceSelectionPending] = useState<{
+    uri: string;
+    filename: string;
+    fileSize?: number;
+    serverFilename?: string;
+  } | null>(null);
+  const [replacementUploading, setReplacementUploading] = useState(false);
+  const [replacementUploadError, setReplacementUploadError] = useState<string | null>(null);
+  /** Cache: device URI -> backend stable filename (stable_id.mp4) so we don't re-upload the same video. */
+  const uploadedReplacementByUriRef = useRef<Map<string, string>>(new Map());
+  const mediaListRef = useRef(mediaList);
+  mediaListRef.current = mediaList;
   const [thumbnailUris, setThumbnailUris] = useState<(string | null)[]>([]);
   const [thumbnailFrameUris, setThumbnailFrameUris] = useState<(string | null)[][]>([]);
   const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
@@ -225,6 +229,98 @@ export default function PreviewScreen() {
   useEffect(() => {
     finishedSegmentsRef.current.clear();
   }, [segments.length]);
+
+  // Preview replacement flow: if clip already on backend (e.g. from homepage), reuse; else upload with deduplicate.
+  // Uses stable ID (filename + file_size) so same file always maps to same backend name; backend normalizes to MP4.
+  useEffect(() => {
+    const pending = replaceSelectionPending;
+    if (!pending || pending.serverFilename != null) return;
+
+    const { uri, filename, fileSize } = pending;
+
+    const applyServerFilename = (serverFilename: string) => {
+      uploadedReplacementByUriRef.current.set(uri, serverFilename);
+      setReplaceSelectionPending((prev) => (prev ? { ...prev, serverFilename } : null));
+      setMediaListForPreview(
+        mediaListRef.current.map((m) => (m.uri === uri ? { ...m, filename: serverFilename } : m))
+      );
+      setReplacementUploading(false);
+      setReplacementUploadError(null);
+    };
+
+    const cached = uploadedReplacementByUriRef.current.get(uri);
+    if (cached != null) {
+      applyServerFilename(cached);
+      return;
+    }
+
+    let cancelled = false;
+    setReplacementUploading(true);
+    setReplacementUploadError(null);
+
+    const sizeForStableId = typeof fileSize === "number" && fileSize > 0 ? fileSize : 0;
+
+    const run = async () => {
+      if (sizeForStableId > 0) {
+        try {
+          const idRes = await fetch(`${SERVER_URL}/media-stable-id`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ filename, file_size: sizeForStableId }),
+          });
+          if (cancelled) return;
+          if (!idRes.ok) throw new Error("Stable ID failed");
+          const idData = await idRes.json();
+          const stableId = idData.stable_id ?? (idData.filename ? idData.filename.replace(/\.[^.]+$/, "") : "");
+          const existsRes = await fetch(`${SERVER_URL}/media/exists?stable_id=${encodeURIComponent(stableId)}`);
+          if (cancelled) return;
+          if (existsRes.ok) {
+            const existsData = await existsRes.json();
+            if (existsData.exists && existsData.filename) {
+              applyServerFilename(existsData.filename);
+              return;
+            }
+          }
+        } catch {
+          // Fall through to upload if stable-id or exists check fails
+        }
+      }
+
+      const formData = new FormData();
+      const ext = filename && filename.includes(".") ? filename.slice(filename.lastIndexOf(".")).toLowerCase() : "";
+      const type = /\.mov$/i.test(ext) ? "video/quicktime" : "video/mp4";
+      formData.append("files", {
+        uri,
+        name: filename || "replacement.mp4",
+        type,
+      } as unknown as Blob);
+      formData.append("deduplicate", "true"); // Reuse if already on backend (e.g. from homepage)
+
+      try {
+        const res = await fetch(`${SERVER_URL}/upload-single`, { method: "POST", body: formData });
+        if (cancelled) return;
+        if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+        const data = await res.json();
+        const serverFilename = data?.files_saved?.[0];
+        if (!serverFilename) {
+          setReplacementUploadError("Server did not return a filename.");
+          setReplacementUploading(false);
+          return;
+        }
+        applyServerFilename(serverFilename);
+      } catch (err) {
+        if (!cancelled) {
+          setReplacementUploadError((err as Error)?.message ?? "Upload failed. Check network.");
+          setReplacementUploading(false);
+        }
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [replaceSelectionPending?.uri, replaceSelectionPending?.filename, replaceSelectionPending?.fileSize, replaceSelectionPending?.serverFilename, setMediaListForPreview]);
 
   const totalDuration =
     segments.length > 0 ? segments[segments.length - 1].endTime : (analyzeResult?.duration ?? 0);
@@ -757,8 +853,9 @@ export default function PreviewScreen() {
     const asset = result.assets[0];
     const uri = asset.uri;
     const filename = asset.fileName ?? `replacement_${Date.now()}.mp4`;
+    const fileSize = typeof (asset as { fileSize?: number }).fileSize === "number" ? (asset as { fileSize: number }).fileSize : undefined;
     setMediaListForPreview([...mediaList, { uri, filename }]);
-    setReplaceSelectionPending({ uri, filename });
+    setReplaceSelectionPending({ uri, filename, fileSize });
   };
 
   const clampToFileDuration = (uri: string | undefined, sec: number) => {
@@ -1465,11 +1562,11 @@ export default function PreviewScreen() {
                             ref={videoRefs[slot]}
                             source={{ uri }}
                             style={[styles.video, isVisible ? styles.videoVisible : styles.videoHidden]}
-                            resizeMode={ResizeMode.CONTAIN}
+                            resizeMode={ResizeMode.COVER}
                             shouldPlay={isPlaying && isVisible && !isScrubbing}
                             isLooping={false}
                             volume={0}
-                            muted
+                            isMuted
                             progressUpdateIntervalMillis={16}
                             onPlaybackStatusUpdate={onPlaybackStatusUpdate(slot)}
                           />
@@ -1645,10 +1742,26 @@ export default function PreviewScreen() {
           videoUri={replaceSelectionPending.uri}
           segmentDurationSec={segments[selectedSegmentIndex].endTime - segments[selectedSegmentIndex].startTime}
           onConfirm={(clipStart, clipEnd) => {
-            replaceSegmentWith(replaceSelectionPending, clipStart, clipEnd);
+            const serverFilename = replaceSelectionPending.serverFilename;
+            if (serverFilename) {
+              replaceSegmentWith(
+                { uri: replaceSelectionPending.uri, filename: serverFilename },
+                clipStart,
+                clipEnd
+              );
+            }
             setReplaceSelectionPending(null);
+            setReplacementUploading(false);
+            setReplacementUploadError(null);
           }}
-          onCancel={() => setReplaceSelectionPending(null)}
+          onCancel={() => {
+            setReplaceSelectionPending(null);
+            setReplacementUploading(false);
+            setReplacementUploadError(null);
+          }}
+          canConfirm={!!replaceSelectionPending.serverFilename}
+          uploading={replacementUploading}
+          uploadError={replacementUploadError}
         />
       )}
     </View>
@@ -1686,7 +1799,7 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 28, fontWeight: "900", color: "#fff", marginBottom: 4 },
   headerSubtitle: { fontSize: 15, color: "rgba(255,255,255,0.95)", fontWeight: "600" },
   previewArea: {
-    height: PREVIEW_AREA_HEIGHT,
+    flex: 1,
     overflow: "hidden",
     backgroundColor: "transparent",
   },
@@ -1699,17 +1812,19 @@ const styles = StyleSheet.create({
     paddingVertical: PREVIEW_MARGIN_V,
   },
   videoContainer: {
-    width: PREVIEW_WIDTH,
-    height: PREVIEW_HEIGHT,
+    width: "98%",
+    maxHeight: "100%",
+    aspectRatio: PREVIEW_ASPECT_RATIO,
     borderRadius: PREVIEW_CARD_BORDER_RADIUS,
     overflow: "hidden",
-    backgroundColor: "transparent",
+    backgroundColor: "#fff",
   },
   videoClip: {
     width: "100%",
     height: "100%",
     borderRadius: PREVIEW_CARD_BORDER_RADIUS,
     overflow: "hidden",
+    backgroundColor: "transparent",
   },
   slotLayer: {
     position: "absolute",
@@ -1719,6 +1834,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     width: "100%",
     height: "100%",
+    backgroundColor: "transparent",
   },
   video: {
     position: "absolute",
@@ -1846,7 +1962,7 @@ const styles = StyleSheet.create({
   },
   placeholderText: { color: "#fff", fontSize: 16, fontWeight: "700" },
   placeholderHint: { color: "#94a3b8", fontSize: 12, marginTop: 8 },
-  footer: { paddingHorizontal: 24, paddingTop: 16, paddingBottom: 28, backgroundColor: "#fff" },
+  footer: { paddingHorizontal: 24, paddingTop: 16, paddingBottom: 32, backgroundColor: "#fff" },
   segmentInfoRow: { marginBottom: 14, alignItems: "center" },
   segmentInfoText: { fontSize: 13, color: "#64748b", fontWeight: "600" },
   footerButtonsRow: { flexDirection: "row", alignItems: "center", gap: 10, flexWrap: "wrap" },

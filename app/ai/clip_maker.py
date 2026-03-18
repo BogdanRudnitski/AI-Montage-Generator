@@ -42,6 +42,10 @@ MAX_SEGMENT_DURATION = 4.0
 MIN_SEGMENT_DURATION = 0.25
 # Same frame rate for every segment so concat doesn't stumble (VFR → CFR)
 SEGMENT_FPS = 30
+# Output montage in portrait (9:16) to avoid black sidebars on mobile
+OUTPUT_WIDTH = 1080
+OUTPUT_HEIGHT = 1920
+OUTPUT_VF = f'scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2'
 
 def sanitize_filename(filename: str) -> str:
     """Remove or replace problematic characters in filenames"""
@@ -90,8 +94,9 @@ class ClipManager:
             print(f"❌ '{self.clips_folder}' folder not found!")
             return
         
-        video_files = [f for f in os.listdir(self.clips_folder) 
-                      if f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm'))]
+        # Backend stores clips as stable_id + original extension (e.g. .mp4, .mov); no format restriction
+        video_files = [f for f in os.listdir(self.clips_folder)
+                       if f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'))]
         
         print(f"🔍 Scanning clips from '{self.clips_folder}'...")
         for video_file in video_files:
@@ -361,22 +366,22 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
             with open(loop_list, 'w') as f:
                 for _ in range(num_loops):
                     f.write(f"file '{safe_path}'\n")
-            # Same FPS + keyframe at start so concat doesn't freeze at boundaries
+            # Same FPS + keyframe at start so concat doesn't freeze at boundaries. Portrait output.
             _run_ffmpeg([
                 'ffmpeg', '-f', 'concat', '-safe', '0', '-i', loop_list,
                 '-t', str(segment_duration),
-                '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2',
+                '-vf', OUTPUT_VF,
                 '-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
                 '-r', str(SEGMENT_FPS), '-vsync', 'cfr',
                 '-force_key_frames', 'expr:gte(t,0)',
                 '-an', '-y', segment_output
             ], step_name=f"segment_{i} (loop)")
         else:
-            # -i then -ss = accurate seek. Same FPS + keyframe at start for clean concat.
+            # -i then -ss = accurate seek. Portrait output.
             _run_ffmpeg([
                 'ffmpeg', '-i', clip_path, '-ss', str(clip_start),
                 '-t', str(segment_duration),
-                '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2',
+                '-vf', OUTPUT_VF,
                 '-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
                 '-r', str(SEGMENT_FPS), '-vsync', 'cfr',
                 '-force_key_frames', 'expr:gte(t,0)',
