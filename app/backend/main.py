@@ -8,6 +8,7 @@ import json
 import re
 from typing import List, Optional
 from pathlib import Path
+from urllib.parse import unquote
 import subprocess
 
 app = FastAPI()
@@ -425,9 +426,11 @@ def _normalize_segment_for_preview(seg: dict) -> dict:
 
 
 @app.post("/analyze")
-async def analyze_only():
-    """Run audio analysis only; compute segment list. Return JSON for preview. No ffmpeg."""
+async def analyze_only(body: Optional[dict] = Body(None)):
+    """Run audio analysis only; compute segment list. Return JSON for preview. No ffmpeg.
+    Body may include song_filename to force which song to analyze (must match a file in uploads/songs)."""
     try:
+        print("[TRACE] POST /analyze received", "body=", body)
         if not AI_VENV_PYTHON.exists():
             return {"success": False, "error": f"AI Python not found at {AI_VENV_PYTHON}"}
         options_file = Path("uploads/options.json")
@@ -435,10 +438,39 @@ async def analyze_only():
             return {"success": False, "error": "options.json not found. Upload song first."}
         with open(options_file) as f:
             options = json.load(f)
+        print("[TRACE] options.json BEFORE lock:", {k: v for k, v in options.items()})
+        songs_dir = Path("uploads/songs")
+        # Include all files (uploaded names may have no extension, e.g. "Tiktok Kesha" or "Tiktok%20Kesha")
+        existing_songs = [f.name for f in songs_dir.iterdir() if f.is_file()] if songs_dir.exists() else []
+        print("[TRACE] files in uploads/songs:", existing_songs)
+        # If client sent song_filename, lock analysis to that song (avoid using stale/cached cut data from another track)
+        requested_song = body.get("song_filename") if body else None
+        if requested_song:
+            if songs_dir.exists():
+                # Match with URL-decode: options may have "Tiktok%20Kesha", client sends "Tiktok Kesha"
+                def norm(s: str) -> str:
+                    return unquote(str(s)).strip().lower()
+                requested_norm = norm(requested_song)
+                if requested_song in existing_songs:
+                    options["song_filename"] = requested_song
+                    with open(options_file, "w") as f:
+                        json.dump(options, f, indent=2)
+                    print("[TRACE] locked options.song_filename to (exact match):", requested_song)
+                else:
+                    match = next((n for n in existing_songs if norm(n) == requested_norm), None)
+                    if match:
+                        options["song_filename"] = match
+                        with open(options_file, "w") as f:
+                            json.dump(options, f, indent=2)
+                        print("[TRACE] locked options.song_filename to (normalized match):", match, "requested:", requested_song)
+                    else:
+                        print("[TRACE] requested_song not in folder, options unchanged; requested:", requested_song)
+        print("[TRACE] options.json AFTER lock:", {k: v for k, v in options.items()})
         max_duration = int(options.get("max_duration", 60))
         env = os.environ.copy()
         env["MAX_DURATION"] = str(max_duration)
         # 1) Run analyze.py
+        print("[TRACE] running analyze.py (cwd=%s) ..." % AI_DIR)
         proc = subprocess.run(
             [str(AI_VENV_PYTHON), str(ANALYZE_SCRIPT)],
             cwd=str(AI_DIR),
@@ -447,7 +479,10 @@ async def analyze_only():
             text=True,
         )
         if proc.returncode != 0:
+            print("[TRACE] analyze.py stderr:", (proc.stderr or "")[:800])
+            print("[TRACE] analyze.py stdout:", (proc.stdout or "")[:800])
             return {"success": False, "error": f"analyze failed: {(proc.stderr or proc.stdout or '')[:500]}"}
+        print("[TRACE] analyze.py exit 0; running compute_segments.py ...")
         # 2) Run compute_segments.py (writes uploads/analyze_result.json and uploads/segments.json)
         proc2 = subprocess.run(
             [str(AI_VENV_PYTHON), str(COMPUTE_SEGMENTS_SCRIPT)],
@@ -456,11 +491,17 @@ async def analyze_only():
             text=True,
         )
         if proc2.returncode != 0:
+            print("[TRACE] compute_segments.py stderr:", (proc2.stderr or "")[:800])
+            print("[TRACE] compute_segments.py stdout:", (proc2.stdout or "")[:800])
             return {"success": False, "error": f"compute_segments failed: {(proc2.stderr or proc2.stdout or '')[:500]}"}
         if not ANALYZE_RESULT_FILE.exists():
             return {"success": False, "error": "analyze_result.json not written"}
         with open(ANALYZE_RESULT_FILE) as f:
             data = json.load(f)
+        print("[TRACE] read analyze_result.json: duration=%s bpm=%s segments=%s first_cut=%s" % (
+            data.get("duration"), data.get("bpm"), len(data.get("segments") or []),
+            (data.get("cut_points") or [None])[0],
+        ))
         # Normalize segments to exact format preview expects (camelCase, same as segments.json for export)
         raw_segments = data.get("segments") or []
         segments = [_normalize_segment_for_preview(s) for s in raw_segments]

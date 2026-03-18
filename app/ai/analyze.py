@@ -657,12 +657,17 @@ def main():
         print("👉 Add .mp3 or .wav files!\n")
         return
     
-    audio_files = [f for f in os.listdir(audio_folder_abs) 
-                   if f.lower().endswith(('.mp3', '.wav', '.m4a'))]
+    # Include known audio extensions and extensionless files (uploaded names like "Tiktok Kesha" or "Tiktok%20Kesha")
+    audio_files = [f for f in os.listdir(audio_folder_abs)
+                   if (f.lower().endswith(('.mp3', '.wav', '.m4a')) or
+                       ('.' not in f and not f.startswith('.')))]
     
     if not audio_files:
         print(f"❌ No audio files in '{AUDIO_FOLDER}'\n")
         return
+
+    print(f"[TRACE] analyze.py: audio_folder_abs={audio_folder_abs}")
+    print(f"[TRACE] analyze.py: audio_files in folder = {audio_files}")
     
     # Load options for all settings
     target_song = None
@@ -710,6 +715,8 @@ def main():
             print(f"⚠️  Specified song '{target_song}' not found")
             print(f"   Available: {', '.join(audio_files)}")
         print(f"🎵 Analyzing first available song: {first_song}")
+
+    print(f"[TRACE] analyze.py: options_file={options_file} target_song={target_song!r} first_song={first_song!r}")
     
     audio_path = os.path.join(audio_folder_abs, first_song)
     
@@ -720,6 +727,9 @@ def main():
     if os.path.exists(output_json_abs):
         with open(output_json_abs, 'r') as f:
             existing_results = json.load(f)
+        print(f"[TRACE] analyze.py: loaded existing audio_analysis.json keys = {list(existing_results.keys())}")
+    else:
+        print(f"[TRACE] analyze.py: no existing audio_analysis.json at {output_json_abs}")
     
     # Run analysis with configured parameters from options.json
     try:
@@ -736,6 +746,8 @@ def main():
         
         results = existing_results.copy()
         results[first_song] = analysis
+
+        print(f"[TRACE] analyze.py: writing audio_analysis.json with key = {first_song!r} (total keys: {list(results.keys())})")
         
         # Save results
         with open(output_json_abs, 'w') as f:

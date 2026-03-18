@@ -2,14 +2,52 @@ import React, { useState, useEffect } from "react";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Video, ResizeMode } from "expo-av";
-import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, StyleSheet, Dimensions, Switch } from "react-native";
+import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, StyleSheet, Dimensions, Switch, Modal, FlatList, TextInput, KeyboardAvoidingView, Platform } from "react-native";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import Slider from '@react-native-community/slider';
 import { SERVER_URL } from "../config";
 import { useAnalyze } from "../context/AnalyzeContext";
+import { getSavedTracks, addTrackToLibrary, removeTrackFromLibrary, type SavedTrack } from "../lib/musicLibrary";
 
-const { width } = Dimensions.get('window');
+const { width } = Dimensions.get("window");
+const ART_SQUARE_SIZE = 120;
+
+/** Base64 encode byte array (chunked for large embedded art). */
+function bytesToBase64(bytes: number[]): string {
+  if (typeof btoa === "undefined") return "";
+  const chunkSize = 8192;
+  let out = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.slice(i, i + chunkSize);
+    out += btoa(String.fromCharCode(...chunk));
+  }
+  return out;
+}
+
+/** Try to extract embedded cover art from MP3; on success set nameTrackArtUri to data URL. */
+function tryExtractMp3Art(uri: string, setArt: (dataUrl: string | null) => void) {
+  (async () => {
+    try {
+      const res = await fetch(uri, { method: "GET" });
+      const ab = await res.arrayBuffer();
+      const arr = Array.from(new Uint8Array(ab));
+      const jsmediatags = require("jsmediatags");
+      jsmediatags.read(arr, {
+        onSuccess: (tag: { tags?: { picture?: { data: number[]; format: string } } }) => {
+          const pic = tag.tags?.picture;
+          if (!pic?.data?.length) return;
+          const format = (pic.format || "image/jpeg").toLowerCase().replace(/^image\//, "") || "jpeg";
+          const b64 = bytesToBase64(pic.data);
+          setArt(`data:image/${format};base64,${b64}`);
+        },
+        onError: () => {},
+      });
+    } catch {
+      // ignore
+    }
+  })();
+}
 
 interface MediaItem {
   uri: string;
@@ -38,6 +76,15 @@ export default function ExploreScreen() {
   const [focusRepetitions, setFocusRepetitions] = useState(true);
   const [density, setDensity] = useState<'low' | 'medium' | 'high' | 'insane'>('medium');
   const [aggressiveness, setAggressiveness] = useState(0.7);
+
+  const [showMusicModal, setShowMusicModal] = useState(false);
+  const [savedTracks, setSavedTracks] = useState<SavedTrack[]>([]);
+  const [musicPickerOpening, setMusicPickerOpening] = useState(false);
+  const [nameTrackModal, setNameTrackModal] = useState<{ uri: string; defaultName: string } | null>(null);
+  const [nameTrackValue, setNameTrackValue] = useState("");
+  const [nameTrackSinger, setNameTrackSinger] = useState("");
+  const [nameTrackArtUri, setNameTrackArtUri] = useState<string | null>(null);
+  const [savingTrack, setSavingTrack] = useState(false);
 
   // Check if all media and song are uploaded
   const allUploaded = mediaList.length > 0 && 
@@ -198,6 +245,88 @@ export default function ExploreScreen() {
     }
   }
 
+  async function pickSongAndAddToLibrary() {
+    if (musicPickerOpening) return;
+    setMusicPickerOpening(true);
+    setShowMusicModal(false);
+    // Let the modal close before opening the document picker (avoids picker not showing / crashes)
+    await new Promise((r) => setTimeout(r, 400));
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "audio/*",
+        copyToCacheDirectory: true,
+      });
+      if (!result.canceled && result.assets?.length) {
+        const asset = result.assets[0];
+        const defaultName = asset.name || "song.mp3";
+        setNameTrackValue(defaultName);
+        setNameTrackSinger("");
+        setNameTrackArtUri(null);
+        setNameTrackModal({ uri: asset.uri, defaultName });
+        tryExtractMp3Art(asset.uri, setNameTrackArtUri);
+      }
+    } catch (err) {
+      console.error(err);
+      Alert.alert("Error", "Could not open file picker or save song.");
+    } finally {
+      setMusicPickerOpening(false);
+    }
+  }
+
+  async function saveNamedTrackToLibrary() {
+    const pending = nameTrackModal;
+    if (!pending || savingTrack) return;
+    const name = nameTrackValue.trim() || pending.defaultName;
+    const artist = nameTrackSinger.trim() || undefined;
+    setSavingTrack(true);
+    try {
+      const track = await addTrackToLibrary(
+        pending.uri,
+        name,
+        nameTrackArtUri ?? undefined,
+        artist
+      );
+      setSong({ uri: track.uri, name: track.name });
+      setSavedTracks((prev) => [...prev, track]);
+      setSongUploaded(false);
+      setNameTrackModal(null);
+      setNameTrackArtUri(null);
+      setNameTrackSinger("");
+    } catch (err) {
+      console.warn("Could not copy to library, using file as-is:", err);
+      setSong({ uri: pending.uri, name });
+      setSavedTracks((prev) => [...prev, { id: `temp_${Date.now()}`, name, artist, uri: pending.uri }]);
+      setSongUploaded(false);
+      setNameTrackModal(null);
+      setNameTrackArtUri(null);
+      setNameTrackSinger("");
+    } finally {
+      setSavingTrack(false);
+    }
+  }
+
+  async function pickCoverArtForTrack() {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+      });
+      if (!result.canceled && result.assets?.[0]) {
+        setNameTrackArtUri(result.assets[0].uri);
+      }
+    } catch (err) {
+      console.error(err);
+      Alert.alert("Error", "Could not pick image.");
+    }
+  }
+
+  async function loadMusicLibrary() {
+    const tracks = await getSavedTracks();
+    setSavedTracks(tracks);
+  }
+
   // Auto-upload song when settings change
   useEffect(() => {
     if (song && !songUploading && !songUploaded) {
@@ -205,10 +334,38 @@ export default function ExploreScreen() {
     }
   }, [song, duration, density, aggressiveness, focusBass, focusVocals, focusRepetitions, syncToGrid]);
 
+  useEffect(() => {
+    if (showMusicModal) loadMusicLibrary();
+  }, [showMusicModal]);
+
+  // Invalidate previous analysis when the user selects a different song (avoid showing Enya cuts for Kesha)
+  useEffect(() => {
+    console.log("[TRACE] song changed → clearing analyzeResult", { songUri: song?.uri, songName: song?.name });
+    setAnalyzeResult(null);
+  }, [song?.uri]);
+
   async function createPreview() {
     try {
-      const res = await fetch(`${SERVER_URL}/analyze`, { method: "POST" });
+      const body = song?.name ? { song_filename: song.name } : {};
+      console.log("[TRACE] createPreview: sending POST /analyze", {
+        currentSongName: song?.name,
+        currentSongUri: song?.uri,
+        requestBody: body,
+      });
+      const res = await fetch(`${SERVER_URL}/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
       const data = await res.json();
+      console.log("[TRACE] createPreview: POST /analyze response", {
+        success: data.success,
+        duration: data.duration,
+        bpm: data.bpm,
+        segmentCount: data.segments?.length ?? 0,
+        firstSegmentStart: data.segments?.[0]?.startTime,
+        firstCutTime: data.cut_points?.[0],
+      });
       if (!data.success) {
         Alert.alert("Analyze Failed", data.error || "Unknown error");
         return;
@@ -420,17 +577,17 @@ export default function ExploreScreen() {
           </View>
 
           {!song ? (
-            <TouchableOpacity 
-              style={styles.audioCard} 
-              onPress={pickSong}
+            <TouchableOpacity
+              style={styles.audioCard}
+              onPress={() => setShowMusicModal(true)}
               activeOpacity={0.7}
             >
               <View style={styles.audioIconContainer}>
                 <Text style={styles.audioIcon}>🎵</Text>
               </View>
               <View style={styles.audioTextContainer}>
-                <Text style={styles.audioTitle}>Add Background Music</Text>
-                <Text style={styles.audioSubtitle}>Required • MP3, WAV, M4A</Text>
+                <Text style={styles.audioTitle}>Select Background Music</Text>
+                <Text style={styles.audioSubtitle}>My music or upload new • MP3, WAV, M4A</Text>
               </View>
               <View style={styles.chevronContainer}>
                 <Text style={styles.chevron}>›</Text>
@@ -456,20 +613,163 @@ export default function ExploreScreen() {
                   {songUploading ? "Uploading..." : songUploaded ? "Ready to create" : "Waiting..."}
                 </Text>
               </View>
-              <TouchableOpacity onPress={pickSong} style={styles.changeButton}>
+              <TouchableOpacity onPress={() => setShowMusicModal(true)} style={styles.changeButton}>
                 <Text style={styles.changeButtonText}>Change</Text>
               </TouchableOpacity>
-              <TouchableOpacity 
+              <TouchableOpacity
                 onPress={() => {
                   setSong(null);
                   setSongUploaded(false);
-                }} 
+                }}
                 style={styles.deleteSongButton}
               >
                 <Text style={styles.deleteSongText}>×</Text>
               </TouchableOpacity>
             </View>
           )}
+
+          <Modal visible={showMusicModal} transparent animationType="fade">
+            <TouchableOpacity
+              style={styles.musicModalBackdrop}
+              activeOpacity={1}
+              onPress={() => setShowMusicModal(false)}
+            >
+              <View style={styles.musicModalContent} onStartShouldSetResponder={() => true}>
+                <Text style={styles.musicModalTitle}>Select music</Text>
+                <Text style={styles.musicModalSubtitle}>Pick from your library or upload a new track</Text>
+                <FlatList
+                  data={savedTracks}
+                  keyExtractor={(t) => t.id}
+                  style={styles.musicModalList}
+                  renderItem={({ item }) => (
+                    <View style={styles.musicModalRow}>
+                      <TouchableOpacity
+                        style={styles.musicModalRowTouch}
+                        onPress={() => {
+                          setSong({ uri: item.uri, name: item.name });
+                          setSongUploaded(false);
+                          setShowMusicModal(false);
+                        }}
+                      >
+                        {item.artUri ? (
+                          <Image source={{ uri: item.artUri }} style={styles.musicModalRowArt} />
+                        ) : (
+                          <View style={styles.musicModalRowArtPlaceholder}>
+                            <Text style={styles.musicModalRowIcon}>🎵</Text>
+                          </View>
+                        )}
+                        <View style={styles.musicModalRowTextWrap}>
+                          <Text style={styles.musicModalRowText} numberOfLines={1}>{item.name}</Text>
+                          {item.artist ? <Text style={styles.musicModalRowArtist} numberOfLines={1}>{item.artist}</Text> : null}
+                        </View>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.musicModalDeleteBtn}
+                        onPress={async () => {
+                          await removeTrackFromLibrary(item.id);
+                          setSavedTracks((prev) => prev.filter((t) => t.id !== item.id));
+                          if (song?.uri === item.uri) {
+                            setSong(null);
+                            setSongUploaded(false);
+                          }
+                        }}
+                      >
+                        <Ionicons name="trash-outline" size={22} color="#94a3b8" />
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                  ListEmptyComponent={
+                    <Text style={styles.musicModalEmpty}>No saved tracks yet. Tap "Upload new" to add one.</Text>
+                  }
+                />
+                <TouchableOpacity
+                  style={[styles.musicModalUploadBtn, musicPickerOpening && styles.musicModalUploadBtnDisabled]}
+                  onPress={pickSongAndAddToLibrary}
+                  disabled={musicPickerOpening}
+                >
+                  {musicPickerOpening ? (
+                    <ActivityIndicator size="small" color="#6366f1" />
+                  ) : (
+                    <Ionicons name="add-circle-outline" size={24} color="#6366f1" />
+                  )}
+                  <Text style={styles.musicModalUploadBtnText}>{musicPickerOpening ? "Opening…" : "Upload new"}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.musicModalCancel} onPress={() => setShowMusicModal(false)}>
+                  <Text style={styles.musicModalCancelText}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            </TouchableOpacity>
+          </Modal>
+
+          {/* Name this track + optional cover art (after picking a file) */}
+          <Modal visible={!!nameTrackModal} transparent animationType="fade">
+            <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.nameTrackModalBackdrop}>
+              <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setNameTrackModal(null)} />
+              <View style={styles.nameTrackModalContent} onStartShouldSetResponder={() => true}>
+                <Text style={styles.nameTrackModalTitle}>Name this track</Text>
+                <Text style={styles.nameTrackModalHint}>Audio is saved to app storage and persists between sessions.</Text>
+                <View style={styles.nameTrackModalBody}>
+                  <TouchableOpacity style={styles.nameTrackArtSquare} onPress={pickCoverArtForTrack} activeOpacity={0.85}>
+                    {nameTrackArtUri ? (
+                      <>
+                        <Image source={{ uri: nameTrackArtUri }} style={styles.nameTrackArtSquareImage} />
+                        <View style={styles.nameTrackArtSquareOverlay}>
+                          <Ionicons name="pencil" size={28} color="#fff" />
+                        </View>
+                      </>
+                    ) : (
+                      <View style={styles.nameTrackArtSquarePlaceholder}>
+                        <Ionicons name="add" size={44} color="#94a3b8" />
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                  <View style={styles.nameTrackFields}>
+                    <View style={styles.nameTrackInputWrap}>
+                      <TextInput
+                        style={styles.nameTrackInputTitle}
+                        value={nameTrackValue}
+                        onChangeText={setNameTrackValue}
+                        placeholder="Title"
+                        placeholderTextColor="#94a3b8"
+                        autoFocus
+                      />
+                      {nameTrackValue.length > 0 && (
+                        <TouchableOpacity style={styles.nameTrackInputClear} onPress={() => setNameTrackValue("")} hitSlop={12}>
+                          <Ionicons name="close-circle" size={22} color="#94a3b8" />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                    <View style={styles.nameTrackInputWrap}>
+                      <TextInput
+                        style={styles.nameTrackInput}
+                        value={nameTrackSinger}
+                        onChangeText={setNameTrackSinger}
+                        placeholder="Singer / Artist"
+                        placeholderTextColor="#94a3b8"
+                      />
+                      {nameTrackSinger.length > 0 && (
+                        <TouchableOpacity style={styles.nameTrackInputClear} onPress={() => setNameTrackSinger("")} hitSlop={12}>
+                          <Ionicons name="close-circle" size={22} color="#94a3b8" />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  </View>
+                </View>
+                <View style={styles.nameTrackActions}>
+                  <TouchableOpacity style={styles.nameTrackCancelBtn} onPress={() => setNameTrackModal(null)}>
+                    <Text style={styles.nameTrackCancelBtnText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.nameTrackSaveBtn, savingTrack && styles.musicModalUploadBtnDisabled]}
+                    onPress={saveNamedTrackToLibrary}
+                    disabled={savingTrack}
+                  >
+                    {savingTrack ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.nameTrackSaveBtnText}>Save</Text>}
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </KeyboardAvoidingView>
+          </Modal>
         </View>
 
         {/* Duration Section */}
@@ -1178,6 +1478,106 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     lineHeight: 26,
   },
+  musicModalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+  },
+  musicModalContent: {
+    backgroundColor: "#fff",
+    borderRadius: 20,
+    padding: 24,
+    width: "100%",
+    maxWidth: 420,
+    maxHeight: "85%",
+  },
+  musicModalTitle: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: "#0f172a",
+    marginBottom: 4,
+  },
+  musicModalSubtitle: {
+    fontSize: 14,
+    color: "#64748b",
+    marginBottom: 18,
+  },
+  musicModalList: {
+    maxHeight: 360,
+  },
+  musicModalRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderBottomWidth: 1,
+    borderBottomColor: "#f1f5f9",
+  },
+  musicModalRowTouch: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 16,
+    paddingHorizontal: 4,
+  },
+  musicModalRowIcon: { fontSize: 28 },
+  musicModalRowArt: { width: 56, height: 56, borderRadius: 10, marginRight: 14 },
+  musicModalRowArtPlaceholder: {
+    width: 56,
+    height: 56,
+    borderRadius: 10,
+    marginRight: 14,
+    backgroundColor: "#f1f5f9",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  musicModalRowTextWrap: { flex: 1, minWidth: 0 },
+  musicModalRowText: { fontSize: 17, color: "#1e293b", fontWeight: "700" },
+  musicModalRowArtist: { fontSize: 14, color: "#64748b", marginTop: 2, fontWeight: "500" },
+  musicModalDeleteBtn: { padding: 10 },
+  musicModalEmpty: {
+    fontSize: 14,
+    color: "#94a3b8",
+    paddingVertical: 24,
+    textAlign: "center",
+  },
+  musicModalUploadBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 14,
+    marginTop: 12,
+    backgroundColor: "#f1f5f9",
+    borderRadius: 12,
+  },
+  musicModalUploadBtnText: { fontSize: 16, fontWeight: "700", color: "#6366f1" },
+  musicModalUploadBtnDisabled: { opacity: 0.6 },
+  musicModalCancel: {
+    paddingVertical: 12,
+    marginTop: 8,
+    alignItems: "center",
+  },
+  musicModalCancelText: { fontSize: 15, fontWeight: "600", color: "#64748b" },
+  nameTrackModalBackdrop: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "rgba(0,0,0,0.5)" },
+  nameTrackModalContent: { width: Math.min(width * 0.92, 440), backgroundColor: "#fff", borderRadius: 20, padding: 24 },
+  nameTrackModalTitle: { fontSize: 22, fontWeight: "800", color: "#0f172a", marginBottom: 4 },
+  nameTrackModalHint: { fontSize: 12, color: "#64748b", marginBottom: 16 },
+  nameTrackModalBody: { flexDirection: "row", marginBottom: 24, gap: 20 },
+  nameTrackArtSquare: { width: ART_SQUARE_SIZE, height: ART_SQUARE_SIZE, borderRadius: 14, overflow: "hidden", backgroundColor: "#f1f5f9" },
+  nameTrackArtSquareImage: { width: ART_SQUARE_SIZE, height: ART_SQUARE_SIZE },
+  nameTrackArtSquareOverlay: { position: "absolute", bottom: 0, left: 0, right: 0, height: 36, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", alignItems: "center" },
+  nameTrackArtSquarePlaceholder: { flex: 1, width: ART_SQUARE_SIZE, height: ART_SQUARE_SIZE, justifyContent: "center", alignItems: "center" },
+  nameTrackFields: { flex: 1, minWidth: 0 },
+  nameTrackInputWrap: { position: "relative", marginBottom: 12 },
+  nameTrackInputTitle: { borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 12, paddingHorizontal: 14, paddingVertical: 14, paddingRight: 44, fontSize: 18, fontWeight: "700", color: "#0f172a" },
+  nameTrackInput: { borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, paddingRight: 44, fontSize: 16, color: "#334155" },
+  nameTrackInputClear: { position: "absolute", right: 12, top: 0, bottom: 0, justifyContent: "center" },
+  nameTrackActions: { flexDirection: "row", justifyContent: "flex-end", gap: 12 },
+  nameTrackCancelBtn: { paddingVertical: 12, paddingHorizontal: 20 },
+  nameTrackCancelBtnText: { fontSize: 15, fontWeight: "600", color: "#64748b" },
+  nameTrackSaveBtn: { backgroundColor: "#6366f1", paddingVertical: 12, paddingHorizontal: 24, borderRadius: 12, minWidth: 88, alignItems: "center" },
+  nameTrackSaveBtnText: { fontSize: 15, fontWeight: "700", color: "#fff" },
   durationRow: {
     flexDirection: "row",
     gap: 12,

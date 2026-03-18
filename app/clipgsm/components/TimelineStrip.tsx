@@ -33,6 +33,7 @@ const SECONDS_PER_VIEWPORT_MIN = 5;
 const SECONDS_PER_VIEWPORT_MAX = 20;
 const RESIZE_EDGE_WIDTH = 28;
 const SCRUB_HIT_SLOP = 24;
+const EPSILON = 0.01; // 10ms; float-safe boundary comparisons
 const THUMB_WIDTH = 40;
 /** Scroll zone inertia: min velocity (px/ms) to trigger coasting; below this release stops immediately. */
 const SCROLL_INERTIA_VELOCITY_THRESHOLD = 0.1;
@@ -123,14 +124,14 @@ export default function TimelineStrip({
     if (!segments.length || stripLayout.leftEdges.length === 0 || totalDuration <= 0) return 0;
     if (t <= 0) return 0;
     const lastIdx = segments.length - 1;
-    if (t >= segments[lastIdx].endTime) {
+    if (t >= segments[lastIdx].endTime - EPSILON) {
       return (
         stripLayout.leftEdges[lastIdx] + (stripLayout.blockWidths[lastIdx] ?? 0)
       );
     }
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
-      if (t >= seg.startTime && t < seg.endTime) {
+      if (t >= seg.startTime - EPSILON && t < seg.endTime - EPSILON) {
         const left = stripLayout.leftEdges[i] ?? 0;
         const bw = stripLayout.blockWidths[i] ?? 0;
         const segDur = seg.endTime - seg.startTime;
@@ -180,6 +181,8 @@ export default function TimelineStrip({
     startSegments?: SegmentRecord[];
   }>({ type: "idle" });
 
+  const isResizingRef = useRef(false);
+
   const viewportLeftRef = useRef(0);
   const viewportRef = useRef<View>(null);
   const segmentsRef = useRef(segments);
@@ -199,6 +202,16 @@ export default function TimelineStrip({
     return Math.max(0, Math.min(stripWidth, locationX));
   };
 
+  const chainSegmentBoundaries = (out: SegmentRecord[]): void => {
+    if (out.length === 0) return;
+    out[0].startTime = 0;
+    for (let i = 1; i < out.length; i++) {
+      const dur = out[i].endTime - out[i].startTime;
+      out[i].startTime = out[i - 1].endTime;
+      out[i].endTime = out[i].startTime + dur;
+    }
+  };
+
   const applyResizeRight = (segmentIndex: number, newCutTime: number): SegmentRecord[] | null => {
     const segs = segmentsRef.current;
     if (segmentIndex < 0 || segmentIndex >= segs.length - 1) return null;
@@ -213,7 +226,7 @@ export default function TimelineStrip({
     const clipEndA = a.clipStart + (T - a.startTime);
     const clipStartB =
       (b.clipEnd ?? b.clipStart + clipLenB) - (b.endTime - T);
-    return segs.map((seg, i) => {
+    const result = segs.map((seg, i) => {
       if (i === segmentIndex) return { ...seg, endTime: T, clipEnd: clipEndA };
       if (i === segmentIndex + 1)
         return { ...seg, startTime: T, endTime: b.endTime + delta, clipStart: clipStartB };
@@ -221,6 +234,8 @@ export default function TimelineStrip({
         return { ...seg, startTime: seg.startTime + delta, endTime: seg.endTime + delta };
       return seg;
     });
+    chainSegmentBoundaries(result);
+    return result;
   };
 
   const applyResizeRightMoveCut = (segmentIndex: number, timeAtFinger: number): SegmentRecord[] | null => {
@@ -243,11 +258,13 @@ export default function TimelineStrip({
       segDurB > 0
         ? b.clipStart + ((T - b.startTime) / segDurB) * clipDurB
         : b.clipStart;
-    return segs.map((seg, i) => {
+    const result = segs.map((seg, i) => {
       if (i === segmentIndex) return { ...seg, endTime: T, clipEnd: clipEndA };
       if (i === segmentIndex + 1) return { ...seg, startTime: T, clipStart: clipStartB };
       return seg;
     });
+    chainSegmentBoundaries(result);
+    return result;
   };
 
   const applyResizeLeftMoveCut = (segmentIndex: number, timeAtFinger: number): SegmentRecord[] | null => {
@@ -275,12 +292,14 @@ export default function TimelineStrip({
     const clipEndCurr = currSegDur > 0
       ? clipStartCurr + (newCurrSegDur / currSegDur) * currClipDur
       : clipStartCurr;
-    return segs.map((seg, i) => {
+    const result = segs.map((seg, i) => {
       if (i === segmentIndex - 1) return { ...seg, endTime: T, clipEnd: clipEndPrev };
       if (i === segmentIndex)
         return { ...seg, startTime: T, clipStart: clipStartCurr, clipEnd: clipEndCurr };
       return seg;
     });
+    chainSegmentBoundaries(result);
+    return result;
   };
 
   const applyResizeLeft = (
@@ -313,7 +332,7 @@ export default function TimelineStrip({
     const clipStart = gestureStart.startClipStart + delta;
     const clipEnd = gestureStart.startClipEnd + delta;
 
-    return segs.map((seg, i) => {
+    const result = segs.map((seg, i) => {
       if (i < segmentIndex) return seg;
 
       if (i === segmentIndex) {
@@ -332,6 +351,8 @@ export default function TimelineStrip({
         endTime: seg.endTime + delta,
       };
     });
+    chainSegmentBoundaries(result);
+    return result;
   };
 
   const handleTouchStart = (e: NativeSyntheticEvent<NativeTouchEvent>) => {
@@ -386,6 +407,7 @@ export default function TimelineStrip({
         try {
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         } catch (_) {}
+        isResizingRef.current = true;
         onResizeStart?.();
         onScrubbingChange?.(true);
         return;
@@ -403,6 +425,7 @@ export default function TimelineStrip({
         try {
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         } catch (_) {}
+        isResizingRef.current = true;
         onResizeStart?.();
         onScrubbingChange?.(true);
         return;
@@ -541,6 +564,7 @@ export default function TimelineStrip({
       onScrubbingChange?.(false);
     }
     if (g.type === "resizeLeft" || g.type === "resizeRight") {
+      isResizingRef.current = false;
       onResizeEnd?.();
     }
     if (g.type === "tap" && g.tapStartX != null) {
@@ -558,6 +582,7 @@ export default function TimelineStrip({
 
   const handleTouchCancel = () => {
     if (gestureRef.current.type === "resizeLeft" || gestureRef.current.type === "resizeRight") {
+      isResizingRef.current = false;
       onResizeEnd?.();
     }
     onScrubbingChange?.(false);

@@ -21,6 +21,7 @@ from clip_maker import ClipManager, compute_segments_only, MAX_DURATION
 
 
 def main():
+    print(f"[TRACE] compute_segments.py: ANALYSIS_JSON={ANALYSIS_JSON}")
     if not os.path.exists(ANALYSIS_JSON):
         print(f"Error: {ANALYSIS_JSON} not found. Run analyze.py first.")
         sys.exit(1)
@@ -30,20 +31,25 @@ def main():
         print("Error: No analysis results.")
         sys.exit(1)
     songs = list(results.keys())
+    print(f"[TRACE] compute_segments.py: audio_analysis.json keys (songs) = {songs}")
     target_song = None
     if os.path.exists(OPTIONS_FILE):
         try:
             with open(OPTIONS_FILE, "r") as f:
                 opts = json.load(f)
                 target_song = opts.get("song_filename")
-        except Exception:
-            pass
+            print(f"[TRACE] compute_segments.py: OPTIONS_FILE={OPTIONS_FILE} opts.song_filename={target_song!r}")
+        except Exception as e:
+            print(f"[TRACE] compute_segments.py: failed to read options: {e}")
     selected_song = target_song if target_song and target_song in songs else songs[0]
     if target_song and target_song not in songs:
         base = target_song.rsplit(".", 1)[0]
         matches = [s for s in songs if s.startswith(base)]
         if matches:
             selected_song = matches[-1]
+        print(f"[TRACE] compute_segments.py: target_song not in songs, selected_song={selected_song!r} (matches by base: {matches})")
+    else:
+        print(f"[TRACE] compute_segments.py: selected_song = {selected_song!r} (using this for cut data)")
     data = results[selected_song]
     cut_points = data.get("cut_points", [])
     duration = float(data.get("duration", 0))
@@ -74,6 +80,7 @@ def main():
         json.dump(analyze_result, f, indent=2)
     with open(SEGMENTS_PATH, "w") as f:
         json.dump(segments, f, indent=2)
+    print(f"[TRACE] compute_segments.py: wrote analyze_result/segments for song = {selected_song!r} ({len(segments)} segments, duration={duration}, first_cut={cut_points[0] if cut_points else None})")
     print(f"Wrote {ANALYZE_RESULT_PATH} and {SEGMENTS_PATH} ({len(segments)} segments)")
 
 
