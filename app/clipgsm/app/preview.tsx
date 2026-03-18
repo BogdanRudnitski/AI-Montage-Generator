@@ -115,6 +115,7 @@ export default function PreviewScreen() {
   const NUM_VIDEO_SLOTS = 3;
   const videoRefs = [useRef<Video>(null), useRef<Video>(null), useRef<Video>(null)];
   const fileDurationByUriRef = useRef<Record<string, number>>({});
+  const [fileDurationsSnapshot, setFileDurationsSnapshot] = useState<Record<string, number>>({});
   const visiblePlaybackSlotRef = useRef(0);
   const [visiblePlaybackSlot, setVisiblePlaybackSlot] = useState(0);
   const currentVisibleSlotRef = useRef(0);
@@ -127,7 +128,6 @@ export default function PreviewScreen() {
   const [replaceSelectionPending, setReplaceSelectionPending] = useState<{ uri: string; filename: string } | null>(null);
   const [thumbnailUris, setThumbnailUris] = useState<(string | null)[]>([]);
   const [thumbnailFrameUris, setThumbnailFrameUris] = useState<(string | null)[][]>([]);
-  const [timelineScrollX, setTimelineScrollX] = useState(0);
   const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
   const [secondsPerViewport, setSecondsPerViewport] = useState(10);
   const [resizeMode, setResizeMode] = useState<"moveCut" | "trim">("moveCut");
@@ -150,6 +150,8 @@ export default function PreviewScreen() {
   const scrubRafRef = useRef<number | null>(null);
   const isScrubbingRef = useRef(false);
   const isResizingRef = useRef(false);
+  const resizingSegmentIndexRef = useRef<number | null>(null);
+  const lastResizeScrubTimeRef = useRef<number | null>(null);
   const lastImmediateScrubSeekAtRef = useRef(0);
   const lastScrubSeekTimeRef = useRef<number>(0);
   const prevSlotUrisRef = useRef<string[]>([]);
@@ -193,8 +195,12 @@ export default function PreviewScreen() {
         const endTime = Number(s.endTime ?? s.end_time ?? 0);
         const clipStart = Number(s.clipStart ?? s.clip_start ?? 0);
         let clipEnd = Number(s.clipEnd ?? s.clip_end ?? 0);
-        if (clipEnd <= clipStart && endTime > startTime) {
-          clipEnd = clipStart + (endTime - startTime);
+        const segDur = endTime - startTime;
+        if (clipEnd <= clipStart && segDur > 0) {
+          clipEnd = clipStart + segDur;
+        }
+        if (segDur > 0 && (clipEnd - clipStart) < segDur) {
+          clipEnd = clipStart + segDur;
         }
         return {
           startTime,
@@ -230,23 +236,27 @@ export default function PreviewScreen() {
   const stripWidth =
     totalDuration > 0 ? (totalDuration / secondsPerViewport) * SCREEN_WIDTH : SCREEN_WIDTH;
 
+  const playheadX = totalDuration > 0 ? (playheadTime / totalDuration) * stripWidth : 0;
+  const timelineScrollX = Math.max(0, Math.min(stripWidth, playheadX));
+
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
 
-  // Full segment list (no dropping) so preview matches export 1:1; built from editable segments
-  const playList = React.useMemo(() => {
-    if (!segments.length) return [];
-    const mediaFilenames = mediaList?.map((m) => m.filename).filter(Boolean) ?? [];
-    const built: PlayItem[] = segments.map((s, i) => {
-      const item = mediaList?.find(
+  // Build play list from segment list (used for scrub during resize from segmentsRef).
+  const buildPlayListFromSegments = (
+    segs: SegmentRecord[],
+    media: { uri?: string; filename?: string }[] | null | undefined
+  ): PlayItem[] => {
+    if (!segs.length) return [];
+    const mediaFilenames = media?.map((m) => m.filename).filter(Boolean) ?? [];
+    return segs.map((s, i) => {
+      const item = media?.find(
         (m) =>
           m.filename === s.clipFilename ||
-          (m.filename &&
-            s.clipFilename &&
-            m.filename.replace(/\s/g, "_") === s.clipFilename)
+          (m.filename && s.clipFilename && m.filename.replace(/\s/g, "_") === s.clipFilename)
       );
       const uri = item?.uri;
       const clipDuration = s.clipEnd - s.clipStart;
@@ -268,11 +278,45 @@ export default function PreviewScreen() {
         endTime: s.endTime,
       };
     });
-    return built;
-  }, [segments, mediaList]);
+  };
+
+  // Full segment list (no dropping) so preview matches export 1:1; built from editable segments
+  const playList = React.useMemo(
+    () => buildPlayListFromSegments(segments, mediaList),
+    [segments, mediaList]
+  );
 
   const playListRef = useRef<PlayItem[]>(playList);
   playListRef.current = playList;
+
+  const segmentSourceDurations = React.useMemo((): (number | null)[] => {
+    if (!segments.length || !mediaList?.length) return [];
+    const durations: (number | null)[] = [];
+    for (let i = 0; i < segments.length; i++) {
+      const s = segments[i];
+      const item = mediaList.find(
+        (m) =>
+          m.filename === s.clipFilename ||
+          (m.filename && s.clipFilename && m.filename.replace(/\s/g, "_") === s.clipFilename)
+      );
+      const uri = item?.uri;
+      if (!uri) {
+        durations.push(null);
+        continue;
+      }
+      const dur = fileDurationByUriRef.current[uri] ?? fileDurationsSnapshot[uri] ?? null;
+      const cap = dur != null && dur > 0 ? dur : null;
+      durations.push(cap);
+    }
+    if (__DEV__) {
+      console.log("[Preview] segmentSourceDurations", {
+        length: durations.length,
+        caps: durations,
+        perSegment: segments.map((s, i) => ({ i, clipFilename: s.clipFilename, cap: durations[i] })),
+      });
+    }
+    return durations;
+  }, [segments, mediaList, fileDurationsSnapshot]);
 
   const getPlaybackSlotForRelativeOffset = (offset: number, base: number) => (base + offset) % 3;
   const visibleSlotIndex = visiblePlaybackSlot;
@@ -280,6 +324,31 @@ export default function PreviewScreen() {
 
   const getSegmentIndexForPlaybackSlot = (slot: number) =>
     currentSegmentIndex + ((slot - visiblePlaybackSlot + NUM_VIDEO_SLOTS) % NUM_VIDEO_SLOTS);
+
+  // Proactively fetch duration from each slot's Video when it may have loaded (so resize guards have limits before user plays).
+  useEffect(() => {
+    if (!playList.length) return;
+    const timer = setTimeout(() => {
+      const list = playListRef.current;
+      const curIdx = currentIndexRef.current;
+      const visSlot = visiblePlaybackSlotRef.current;
+      [0, 1, 2].forEach((slot) => {
+        const ref = videoRefs[slot]?.current;
+        if (!ref) return;
+        ref.getStatusAsync().then((s) => {
+          if (!s.isLoaded || s.durationMillis == null || s.durationMillis <= 0) return;
+          const segIdx = curIdx + ((slot - visSlot + NUM_VIDEO_SLOTS) % NUM_VIDEO_SLOTS);
+          const seg = list[segIdx];
+          const uri = seg?.uri;
+          if (!uri) return;
+          const durationSec = s.durationMillis / 1000;
+          fileDurationByUriRef.current[uri] = durationSec;
+          setFileDurationsSnapshot((prev) => (prev[uri] === durationSec ? prev : { ...prev, [uri]: durationSec }));
+        }).catch(() => {});
+      });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [playList, currentSegmentIndex, visiblePlaybackSlot]);
 
   const THUMBNAIL_REQUEST_DELAY_MS = 120;
   const VIEWPORT_DEBOUNCE_MS = 80;
@@ -548,22 +617,31 @@ export default function PreviewScreen() {
     perfLog("preview:render-pass", { currentSegmentIndex });
   }, [currentSegmentIndex]);
 
-  // Map global time (0..duration) to segment index and in-clip position
-  const getSegmentAtTime = (t: number): { segmentIndex: number; offsetInSegment: number; clipPosition: number } | null => {
-    if (!playList.length || t < 0) return null;
-    for (let i = 0; i < playList.length; i++) {
-      const item = playList[i];
+  // Map global time (0..duration) to segment index and in-clip position. Uses segment/clip duration ratio so trim mode shows correct frame.
+  const getSegmentAtTimeFromList = (
+    list: PlayItem[],
+    t: number
+  ): { segmentIndex: number; offsetInSegment: number; clipPosition: number } | null => {
+    if (!list.length || t < 0) return null;
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
       if (t >= item.startTime - EPSILON && t < item.endTime - EPSILON) {
         const offsetInSegment = t - item.startTime;
-        const clipPosition = item.clipStart + offsetInSegment;
+        const segDur = item.segmentDuration;
+        const clipDur = item.clipDuration;
+        const clipPosition =
+          segDur > 0 ? item.clipStart + (offsetInSegment / segDur) * clipDur : item.clipStart;
         return { segmentIndex: i, offsetInSegment, clipPosition };
       }
     }
-    const last = playList[playList.length - 1];
+    const last = list[list.length - 1];
     if (t >= last.endTime - EPSILON)
-      return { segmentIndex: playList.length - 1, offsetInSegment: last.segmentDuration, clipPosition: last.clipEnd };
+      return { segmentIndex: list.length - 1, offsetInSegment: last.segmentDuration, clipPosition: last.clipEnd };
     return null;
   };
+
+  const getSegmentAtTime = (t: number): { segmentIndex: number; offsetInSegment: number; clipPosition: number } | null =>
+    getSegmentAtTimeFromList(playList, t);
 
   /** Insert a cut at the current playhead; total duration unchanged. No-op if playhead not inside a segment or would create zero-length segment. */
   const addCutAtPlayhead = () => {
@@ -716,7 +794,9 @@ export default function PreviewScreen() {
     const currentIndex = currentIndexRef.current;
     if (targetIndex !== currentIndex) {
       soundRef.current?.setPositionAsync(time * 1000).catch(() => {});
-      advanceTo(targetIndex, { force: true, seekToClipPosition: info.clipPosition });
+      if (!isScrubbingRef.current) {
+        advanceTo(targetIndex, { force: true, seekToClipPosition: info.clipPosition });
+      }
     } else {
       setCurrentSegmentIndex(targetIndex);
       soundRef.current?.setPositionAsync(time * 1000).catch(() => {});
@@ -740,27 +820,94 @@ export default function PreviewScreen() {
     const t = pendingScrubTimeRef.current;
     if (t === null) return;
     const quantizedTime = quantizeToFrame(t);
-    timelineTimeRef.current = quantizedTime;
-    setPlayheadTime(quantizedTime);
-    const info = getSegmentAtTime(quantizedTime);
+    if (isResizingRef.current) {
+      lastResizeScrubTimeRef.current = quantizedTime;
+    } else {
+      timelineTimeRef.current = quantizedTime;
+      setPlayheadTime(quantizedTime);
+    }
+    const list =
+      isResizingRef.current && segmentsRef.current.length > 0
+        ? buildPlayListFromSegments(segmentsRef.current, mediaList)
+        : playListRef.current;
+
+    const resizing = isResizingRef.current;
+    const pinnedIdx = resizingSegmentIndexRef.current;
+
+    let info: { segmentIndex: number; offsetInSegment: number; clipPosition: number } | null;
+
+    if (resizing && pinnedIdx != null && pinnedIdx < list.length) {
+      const item = list[pinnedIdx];
+      if (item) {
+        const offsetInSegment = Math.max(0, Math.min(quantizedTime - item.startTime, item.segmentDuration));
+        const segDur = item.segmentDuration;
+        const clipDur = item.clipDuration;
+        const clipPosition = segDur > 0
+          ? item.clipStart + (offsetInSegment / segDur) * clipDur
+          : item.clipStart;
+        info = { segmentIndex: pinnedIdx, offsetInSegment, clipPosition };
+      } else {
+        info = getSegmentAtTimeFromList(list, quantizedTime);
+      }
+    } else {
+      info = getSegmentAtTimeFromList(list, quantizedTime);
+    }
+
     if (info === null) {
       if (isScrubbingRef.current) scrubRafRef.current = requestAnimationFrame(applyScrubFrame);
       return;
     }
-    if (Math.abs(quantizedTime - lastScrubSeekTimeRef.current) < FRAME) {
-      // if (__DEV__) debugLog("scrub:immediate-seek-skip", { reason: "frame-throttled" });
+    if (!resizing && Math.abs(quantizedTime - lastScrubSeekTimeRef.current) < FRAME) {
       if (isScrubbingRef.current) scrubRafRef.current = requestAnimationFrame(applyScrubFrame);
       return;
     }
-    const targetIndex = info.segmentIndex;
-    const currentIndex = currentIndexRef.current;
-    const item = playList[targetIndex];
 
-    // Keep audio in sync with the playhead when we seek
-    soundRef.current?.setPositionAsync(quantizedTime * 1000).catch(() => {});
+    let targetIndex = info.segmentIndex;
+    const currentIndex = currentIndexRef.current;
+    const advanceInFlight = advanceInFlightRef.current;
+
+    if (!resizing && targetIndex !== currentIndex) {
+      const HYSTERESIS = 0.06;
+      const curItem = list[currentIndex];
+      if (curItem) {
+        if (targetIndex < currentIndex && quantizedTime >= curItem.startTime - HYSTERESIS) {
+          targetIndex = currentIndex;
+          info = {
+            segmentIndex: currentIndex,
+            offsetInSegment: 0,
+            clipPosition: curItem.clipStart,
+          };
+        } else if (targetIndex > currentIndex && quantizedTime <= curItem.endTime + HYSTERESIS) {
+          targetIndex = currentIndex;
+          const offset = Math.min(curItem.segmentDuration, quantizedTime - curItem.startTime);
+          info = {
+            segmentIndex: currentIndex,
+            offsetInSegment: offset,
+            clipPosition: curItem.clipStart + (curItem.segmentDuration > 0 ? (offset / curItem.segmentDuration) * curItem.clipDuration : 0),
+          };
+        }
+      }
+      if (targetIndex !== currentIndex && advanceInFlight) {
+        targetIndex = currentIndex;
+        const cur = list[currentIndex];
+        if (cur) {
+          const atEnd = quantizedTime >= cur.endTime - 0.01;
+          info = {
+            segmentIndex: currentIndex,
+            offsetInSegment: atEnd ? cur.segmentDuration : 0,
+            clipPosition: atEnd ? cur.clipEnd : cur.clipStart,
+          };
+        }
+      }
+    }
+
+    const item = list[targetIndex];
+
+    if (!resizing) {
+      soundRef.current?.setPositionAsync(quantizedTime * 1000).catch(() => {});
+    }
 
     if (item?.uri && targetIndex === currentIndex) {
-      // SAME SEGMENT: seek the currently visible player immediately (throttled) for smooth scrubbing
       const now = Date.now();
       if (now - lastImmediateScrubSeekAtRef.current >= 16) {
         lastImmediateScrubSeekAtRef.current = now;
@@ -797,7 +944,6 @@ export default function PreviewScreen() {
         });
       }
     } else {
-      // DIFFERENT SEGMENT: jump with force and seek new slot to clip position
       lastScrubSeekTimeRef.current = quantizedTime;
       if (__DEV__) {
         debugLog("scrub:deferred-cross-segment", {
@@ -806,8 +952,31 @@ export default function PreviewScreen() {
           clipPosition: info.clipPosition,
         });
       }
-      soundRef.current?.setPositionAsync(quantizedTime * 1000).catch(() => {});
-      advanceTo(targetIndex, { force: true, seekToClipPosition: info.clipPosition });
+      if (!resizing) {
+        soundRef.current?.setPositionAsync(quantizedTime * 1000).catch(() => {});
+      }
+      if (isScrubbingRef.current) {
+        // Direct scrub path: do NOT use advanceTo(). Update segment state/refs; then seek the visible
+        // slot on next frame (after React commits the new source) so we don't trigger playback transitions.
+        currentIndexRef.current = targetIndex;
+        segmentBoundsRef.current = { startTime: item.startTime, endTime: item.endTime };
+        segmentStartTimeRef.current = Date.now() / 1000;
+        setCurrentSegmentIndex(targetIndex);
+        const seekSec = seekSecForScrub(item, info.clipPosition);
+        const slot = currentVisibleSlotRef.current;
+        requestAnimationFrame(() => {
+          const ref = getMountedVideoRef(slot);
+          if (ref) {
+            ref.setPositionAsync(seekSec * 1000, {
+              toleranceMillisBefore: 0,
+              toleranceMillisAfter: 0,
+            }).catch(() => {});
+          }
+        });
+        if (__DEV__) debugLog("scrub:direct-jump", { to: targetIndex, clipPosition: info.clipPosition });
+      } else {
+        advanceTo(targetIndex, { force: true, seekToClipPosition: info.clipPosition });
+      }
     }
     if (isScrubbingRef.current) {
       scrubRafRef.current = requestAnimationFrame(applyScrubFrame);
@@ -944,10 +1113,10 @@ export default function PreviewScreen() {
     if (advanceInFlightRef.current) return;
     advanceInFlightRef.current = true;
     const fromIndex = currentIndexRef.current;
+    const list = playListRef.current;
     try {
-      if (nextIndex < 0 || nextIndex >= playList.length) {
-        if (nextIndex >= playList.length) {
-          // Final segment finished: stop playback. Do NOT reset timelineTime or currentIndex; only reset when user presses play again.
+      if (nextIndex < 0 || nextIndex >= list.length) {
+        if (nextIndex >= list.length && list.length > 0) {
           const slot = currentVisibleSlotRef.current;
           const ref = getMountedVideoRef(slot);
           if (ref) ref.pauseAsync().catch(() => {});
@@ -955,7 +1124,8 @@ export default function PreviewScreen() {
           setPlaybackEnded(true);
           setIsPlaying(false);
         }
-        if (__DEV__) debugLog("advanceTo-ignored", { reason: "out-of-range", from: fromIndex, to: nextIndex });
+        if (__DEV__) debugLog("advanceTo-ignored", { reason: "out-of-range", from: fromIndex, to: nextIndex, listLen: list.length });
+        advanceInFlightRef.current = false;
         return;
       }
       let destinationIndex = nextIndex;
@@ -965,19 +1135,24 @@ export default function PreviewScreen() {
           if (__DEV__) debugLog("advanceTo-ignored", { reason: "clamped-to-sequential", from: fromIndex, to: nextIndex, clampedTo: destinationIndex });
         } else if (nextIndex < fromIndex) {
           if (__DEV__) debugLog("advanceTo-ignored", { reason: "backward-without-force", from: fromIndex, to: nextIndex });
+          advanceInFlightRef.current = false;
           return;
         }
       }
       const now = Date.now();
       if (!options?.force && now - lastAdvanceAtRef.current < ADVANCE_DEBOUNCE_MS) {
         if (__DEV__) debugLog("advanceTo-ignored", { reason: "debounce", from: fromIndex, to: destinationIndex });
+        advanceInFlightRef.current = false;
         return;
       }
       lastAdvanceAtRef.current = now;
       if (__DEV__) debugLog("advanceTo-request", { from: fromIndex, to: destinationIndex, force: options?.force });
 
-      const nextSeg = playList[destinationIndex];
-      if (!nextSeg) return;
+      const nextSeg = list[destinationIndex];
+      if (!nextSeg) {
+        advanceInFlightRef.current = false;
+        return;
+      }
       const nextVisibleSlot = (visiblePlaybackSlotRef.current + 1) % 3;
       const fromSlot = currentVisibleSlotRef.current;
       const fromRef = getMountedVideoRef(fromSlot);
@@ -998,6 +1173,10 @@ export default function PreviewScreen() {
         destinationIndex,
       });
 
+      const clearAdvanceInFlight = () => {
+        advanceInFlightRef.current = false;
+      };
+
       if (toRef) {
         const token = ++slotSeekTokenRef.current[nextVisibleSlot];
         toRef
@@ -1007,6 +1186,7 @@ export default function PreviewScreen() {
           .then(() => {
             if (token !== slotSeekTokenRef.current[nextVisibleSlot]) {
               if (__DEV__) debugLog("seek-token-stale", { slot: nextVisibleSlot, token });
+              clearAdvanceInFlight();
               return;
             }
             visiblePlaybackSlotRef.current = nextVisibleSlot;
@@ -1016,8 +1196,10 @@ export default function PreviewScreen() {
               startTime: nextSeg.startTime,
               endTime: nextSeg.endTime,
             };
-            timelineTimeRef.current = nextSeg.startTime;
-            setPlayheadTime(nextSeg.startTime);
+            if (!isResizingRef.current) {
+              timelineTimeRef.current = nextSeg.startTime;
+              setPlayheadTime(nextSeg.startTime);
+            }
             segmentStartTimeRef.current = Date.now() / 1000;
             setCurrentSegmentIndex(destinationIndex);
             if (__DEV__) debugLog("advanceTo-commit", { to: destinationIndex });
@@ -1034,7 +1216,7 @@ export default function PreviewScreen() {
 
             const farSlot = (nextVisibleSlot + 2) % 3;
             const preloadIndex = destinationIndex + 2;
-            const preloadSeg = playList[preloadIndex];
+            const preloadSeg = playListRef.current[preloadIndex];
             if (preloadSeg?.uri) {
               const preloadRef = getMountedVideoRef(farSlot);
               if (preloadRef) {
@@ -1047,6 +1229,7 @@ export default function PreviewScreen() {
                   .catch(() => {});
               } else if (__DEV__) debugLog("slot-ref-null", { slot: farSlot, action: "preload" });
             }
+            clearAdvanceInFlight();
           })
           .catch((e) => {
             if (__DEV__) console.warn("[Preview] advanceTo: toRef seek/warm failed", e);
@@ -1054,10 +1237,13 @@ export default function PreviewScreen() {
             setVisiblePlaybackSlot(nextVisibleSlot);
             currentIndexRef.current = destinationIndex;
             segmentBoundsRef.current = { startTime: nextSeg.startTime, endTime: nextSeg.endTime };
-            timelineTimeRef.current = nextSeg.startTime;
-            setPlayheadTime(nextSeg.startTime);
+            if (!isResizingRef.current) {
+              timelineTimeRef.current = nextSeg.startTime;
+              setPlayheadTime(nextSeg.startTime);
+            }
             segmentStartTimeRef.current = Date.now() / 1000;
             setCurrentSegmentIndex(destinationIndex);
+            clearAdvanceInFlight();
           });
       } else {
         if (__DEV__) debugLog("slot-ref-null", { slot: nextVisibleSlot, action: "advanceTo" });
@@ -1065,14 +1251,16 @@ export default function PreviewScreen() {
         setVisiblePlaybackSlot(nextVisibleSlot);
         currentIndexRef.current = destinationIndex;
         segmentBoundsRef.current = { startTime: nextSeg.startTime, endTime: nextSeg.endTime };
-        timelineTimeRef.current = nextSeg.startTime;
-        setPlayheadTime(nextSeg.startTime);
+        if (!isResizingRef.current) {
+          timelineTimeRef.current = nextSeg.startTime;
+          setPlayheadTime(nextSeg.startTime);
+        }
         segmentStartTimeRef.current = Date.now() / 1000;
         setCurrentSegmentIndex(destinationIndex);
+        clearAdvanceInFlight();
       }
     } catch (e) {
       console.error("[Preview] advanceTo crashed", e);
-    } finally {
       advanceInFlightRef.current = false;
     }
   };
@@ -1080,17 +1268,27 @@ export default function PreviewScreen() {
   const onPlaybackStatusUpdate =
     (slot: number) => (status: AVPlaybackStatus) => {
       try {
-        if (!status.isLoaded || playList.length === 0 || isScrubbing) return;
+        const list = playListRef.current;
+        if (!status.isLoaded || list.length === 0) return;
+        const durationMillis = status.durationMillis ?? 0;
+        const durationSec = durationMillis / 1000;
+        if (durationSec > 0) {
+          const segIdx = getSegmentIndexForPlaybackSlot(slot);
+          const segForSlot = list[segIdx];
+          const uriForSlot = segForSlot?.uri;
+          if (uriForSlot) {
+            fileDurationByUriRef.current[uriForSlot] = durationSec;
+            setFileDurationsSnapshot((prev) => (prev[uriForSlot] === durationSec ? prev : { ...prev, [uriForSlot]: durationSec }));
+          }
+        }
+        if (isScrubbing || isScrubbingRef.current || isResizingRef.current) return;
         if (slot !== currentVisibleSlotRef.current) return;
 
         const idx = currentIndexRef.current;
-        const seg = playList[idx];
+        const seg = list[idx];
         if (!seg || !seg.uri) return;
         const position = status.positionMillis / 1000;
-        const durationMillis = status.durationMillis ?? 0;
-        const durationSec = durationMillis / 1000;
         const didJustFinish = "didJustFinish" in status && (status as AVPlaybackStatus & { didJustFinish?: boolean }).didJustFinish === true;
-        if (durationSec > 0) fileDurationByUriRef.current[seg.uri] = durationSec;
 
         const fileDur = fileDurationByUriRef.current[seg.uri];
         const effectiveClipEnd = fileDur != null && fileDur > 0
@@ -1098,14 +1296,15 @@ export default function PreviewScreen() {
           : seg.clipEnd;
         const atClipEnd = position >= effectiveClipEnd - EPSILON;
         const atNaturalEnd = didJustFinish || (durationSec > 0 && position >= durationSec - EPSILON);
+        const needsLooping = seg.clipDuration > 0 && seg.segmentDuration > seg.clipDuration;
         const segmentDone =
-          timelineTimeRef.current >= seg.endTime - EPSILON || atClipEnd || atNaturalEnd;
+          timelineTimeRef.current >= seg.endTime - EPSILON ||
+          (!needsLooping && (atClipEnd || atNaturalEnd));
 
         if (segmentDone && !finishedSegmentsRef.current.has(idx)) {
           finishedSegmentsRef.current.add(idx);
           if (__DEV__) debugLog("segment-done", { idx });
-          if (idx + 1 >= playList.length) {
-            // Stop at end of timeline: pause video and audio, stop playback. Do NOT reset timelineTime or currentIndex; only reset when user presses play again.
+          if (idx + 1 >= list.length) {
             const slotRef = getMountedVideoRef(slot);
             if (slotRef) slotRef.pauseAsync().catch(() => {});
             else if (__DEV__) debugLog("slot-ref-null", { slot, action: "pause-at-end" });
@@ -1114,7 +1313,7 @@ export default function PreviewScreen() {
             setIsPlaying(false);
             return;
           }
-          advanceTo(idx + 1);
+          if (!isScrubbingRef.current) advanceTo(idx + 1);
           return;
         }
 
@@ -1210,7 +1409,7 @@ export default function PreviewScreen() {
         const t = Math.min(seg.startTime + elapsed, seg.endTime);
         timelineTimeRef.current = t;
         setPlayheadTime(t);
-        if (t >= seg.endTime - EPSILON) {
+        if (t >= seg.endTime - EPSILON && !isScrubbingRef.current) {
           advanceTo(idx + 1);
         }
         if (__DEV__ && Date.now() - playheadLogThrottleRef.current > 1000) {
@@ -1298,12 +1497,8 @@ export default function PreviewScreen() {
   }, [currentSegmentIndex, playList, visibleSlotIndex, visiblePlaybackSlot, isScrubbing, isPlaying]);
 
   useEffect(() => {
-    const max = Math.max(0, stripWidth - timelineViewportWidth);
-    if (timelineScrollX > max) {
-      setTimelineScrollX(max);
-      timelineScrollRef.current?.scrollTo({ x: max, animated: false });
-    }
-  }, [stripWidth, timelineViewportWidth, timelineScrollX]);
+    timelineScrollRef.current?.scrollTo({ x: timelineScrollX, animated: false });
+  }, [timelineScrollX]);
 
   if (!analyzeResult) return null;
   const totalSegments = playList.length;
@@ -1416,6 +1611,7 @@ export default function PreviewScreen() {
         <TimelineStrip
           segments={segments}
           totalDuration={totalDuration}
+          segmentSourceDurations={segmentSourceDurations}
           playheadTime={playheadTime}
           onPlayheadChange={(t) => {
             pendingScrubTimeRef.current = t;
@@ -1424,13 +1620,29 @@ export default function PreviewScreen() {
               applyScrubFrame();
             }
           }}
-          onSegmentsChange={(next) => setSegments((_prev) => next)}
+          onSegmentsChange={(next) => {
+            segmentsRef.current = next;
+            setSegments((_prev) => next);
+          }}
           selectedSegmentIndex={selectedSegmentIndex}
-          onResizeStart={() => {
+          onResizeStart={(segIdx) => {
             isResizingRef.current = true;
+            resizingSegmentIndexRef.current = segIdx;
+            isPlayingRef.current = false;
+            setIsPlaying(false);
+            const ref = getMountedVideoRef(visibleSlotIndex);
+            if (ref) ref.pauseAsync().catch(() => {});
+            soundRef.current?.pauseAsync().catch(() => {});
           }}
           onResizeEnd={() => {
             isResizingRef.current = false;
+            resizingSegmentIndexRef.current = null;
+            const resizeT = lastResizeScrubTimeRef.current;
+            if (resizeT != null) {
+              timelineTimeRef.current = resizeT;
+              setPlayheadTime(resizeT);
+              lastResizeScrubTimeRef.current = null;
+            }
             setSegments((prev) => [...prev]);
           }}
           onSelectSegment={(i) => {
@@ -1442,7 +1654,9 @@ export default function PreviewScreen() {
                 timelineTimeRef.current = t;
                 setPlayheadTime(t);
                 soundRef.current?.setPositionAsync(t * 1000).catch(() => {});
-                advanceTo(info.segmentIndex, { force: true, seekToClipPosition: info.clipPosition });
+                if (!isScrubbingRef.current) {
+                  advanceTo(info.segmentIndex, { force: true, seekToClipPosition: info.clipPosition });
+                }
               } else {
                 setCurrentSegmentIndex(info.segmentIndex);
                 pendingSeekRef.current = { segmentIndex: info.segmentIndex, clipPosition: info.clipPosition };
@@ -1466,7 +1680,6 @@ export default function PreviewScreen() {
             }
           }}
           timelineScrollX={timelineScrollX}
-          onTimelineScrollChange={setTimelineScrollX}
           timelineViewportWidth={timelineViewportWidth}
           onTimelineViewportLayout={setTimelineViewportWidth}
           timelineScrollRef={timelineScrollRef}

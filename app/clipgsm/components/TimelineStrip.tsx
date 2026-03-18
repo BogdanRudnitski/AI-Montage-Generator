@@ -1,4 +1,4 @@
-import React, { useRef, useMemo, useState, useEffect } from "react";
+import React, { useRef, useMemo, useEffect } from "react";
 import {
   View,
   Image,
@@ -8,15 +8,12 @@ import {
   Dimensions,
   NativeSyntheticEvent,
   NativeTouchEvent,
-  Animated,
 } from "react-native";
 import * as Haptics from "expo-haptics";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const STRIP_HEIGHT = 48;
 const SCROLL_ZONE_HEIGHT = STRIP_HEIGHT * 2;
-const SCRUB_ZONE_HEIGHT = Math.round(SCROLL_ZONE_HEIGHT / 4);
-const TIMELINE_BLOCK_HEIGHT = SCRUB_ZONE_HEIGHT + STRIP_HEIGHT + SCROLL_ZONE_HEIGHT;
 
 function debugLog(tag: string, data?: object) {
   if (typeof __DEV__ !== "undefined" && __DEV__) {
@@ -31,7 +28,9 @@ const BLOCK_SEPARATOR_COLOR = "rgba(0, 0, 0, 0.12)";
 const SECONDS_PER_VIEWPORT_DEFAULT = 10;
 const SECONDS_PER_VIEWPORT_MIN = 5;
 const SECONDS_PER_VIEWPORT_MAX = 20;
-const RESIZE_EDGE_WIDTH = 28;
+const RESIZE_TOUCH_WIDTH = 28;
+const RESIZE_BORDER_WIDTH = 8;
+const MIN_CLIP_DURATION = 0.1;
 const SCRUB_HIT_SLOP = 24;
 const EPSILON = 0.01; // 10ms; float-safe boundary comparisons
 const THUMB_WIDTH = 40;
@@ -51,36 +50,35 @@ export interface SegmentRecord {
 
 type GestureType = "idle" | "scrub" | "resizeLeft" | "resizeRight" | "tap";
 
+export type ResizeResult = { segments: SegmentRecord[]; hitLimit: boolean } | null;
+
 interface TimelineStripProps {
   segments: SegmentRecord[];
   totalDuration: number;
+  segmentSourceDurations?: (number | null)[];
   playheadTime: number;
   onPlayheadChange: (t: number) => void;
   onSegmentsChange: (next: SegmentRecord[]) => void;
   selectedSegmentIndex: number | null;
   onSelectSegment: (index: number | null) => void;
   thumbnailUris: (string | null)[];
-  /** Optional: multiple frame URIs per segment for TikTok-style strip; each segment can have [uri1, uri2, ...]. */
   thumbnailFrameUris?: (string | null)[][];
   onScrubbingChange?: (scrubbing: boolean) => void;
-  onResizeStart?: () => void;
+  onResizeStart?: (segmentIndex: number) => void;
   onResizeEnd?: () => void;
   timelineScrollX: number;
-  onTimelineScrollChange: (x: number) => void;
   timelineViewportWidth: number;
   onTimelineViewportLayout: (width: number) => void;
   timelineScrollRef: React.RefObject<ScrollView | null>;
-  /** "moveCut" = only move the cut between two clips (default). "trim" = change duration and shift following segments. */
   resizeMode?: "moveCut" | "trim";
-  /** Seconds of timeline shown across the viewport width; default 10. Two-finger zoom in scroll zone changes this. */
   secondsPerViewport?: number;
-  /** Called when user zooms with two fingers in the scroll zone. */
   onSecondsPerViewportChange?: (value: number) => void;
 }
 
 export default function TimelineStrip({
   segments,
   totalDuration,
+  segmentSourceDurations = [],
   playheadTime,
   onPlayheadChange,
   onSegmentsChange,
@@ -92,7 +90,6 @@ export default function TimelineStrip({
   onResizeStart,
   onResizeEnd,
   timelineScrollX,
-  onTimelineScrollChange,
   timelineViewportWidth,
   onTimelineViewportLayout,
   timelineScrollRef,
@@ -144,7 +141,14 @@ export default function TimelineStrip({
 
   const xToTime = (x: number): number => {
     if (!segments.length || stripLayout.blockWidths.length === 0 || totalDuration <= 0) return 0;
+    if (x <= 0) return (x / stripWidth) * totalDuration;
     const { leftEdges, blockWidths } = stripLayout;
+    const lastIdx = segments.length - 1;
+    const lastRight = leftEdges[lastIdx] + (blockWidths[lastIdx] ?? 0);
+    if (x >= lastRight) {
+      const pxPerSec = stripWidth / totalDuration;
+      return totalDuration + (x - lastRight) / pxPerSec;
+    }
     for (let i = 0; i < leftEdges.length; i++) {
       const left = leftEdges[i];
       const bw = blockWidths[i] ?? 0;
@@ -155,7 +159,7 @@ export default function TimelineStrip({
         return seg.startTime + frac * segDur;
       }
     }
-    return segments[segments.length - 1]?.endTime ?? totalDuration;
+    return segments[lastIdx]?.endTime ?? totalDuration;
   };
 
   const getSegmentIndexAtX = (x: number): number | null => {
@@ -182,24 +186,41 @@ export default function TimelineStrip({
   }>({ type: "idle" });
 
   const isResizingRef = useRef(false);
+  const lastHapticAtLimitRef = useRef(false);
 
   const viewportLeftRef = useRef(0);
   const viewportRef = useRef<View>(null);
   const segmentsRef = useRef(segments);
   const onSegmentsChangeRef = useRef(onSegmentsChange);
+  const segmentSourceDurationsRef = useRef(segmentSourceDurations);
+  const playheadTimeRef = useRef(playheadTime);
   segmentsRef.current = segments;
   onSegmentsChangeRef.current = onSegmentsChange;
+  segmentSourceDurationsRef.current = segmentSourceDurations;
+  playheadTimeRef.current = playheadTime;
 
   const getStripX = (e: { nativeEvent: { locationX: number; pageX: number } }) => {
     const pageX = e.nativeEvent.pageX;
     const locationX = e.nativeEvent.locationX;
     if (viewportLeftRef.current !== 0) {
-      const xInStrip = pageX - viewportLeftRef.current + timelineScrollX;
-      if (xInStrip >= 0 && xInStrip <= stripWidth * 1.1) {
-        return Math.max(0, Math.min(stripWidth, xInStrip));
-      }
+      const xInStrip = pageX - viewportLeftRef.current + timelineScrollX - halfViewport;
+      return xInStrip;
     }
-    return Math.max(0, Math.min(stripWidth, locationX));
+    return locationX - halfViewport;
+  };
+
+  /** Clamp segment clip range to source duration: clipStart >= 0, clipEnd <= max, clipEnd - clipStart <= max. */
+  const clampSegmentToSource = (
+    clipStart: number,
+    clipEnd: number,
+    maxSourceDuration: number | null | undefined
+  ): { clipStart: number; clipEnd: number } => {
+    if (maxSourceDuration == null || maxSourceDuration <= 0)
+      return { clipStart: Math.max(0, clipStart), clipEnd };
+    let cs = Math.max(0, clipStart);
+    let ce = Math.min(maxSourceDuration, clipEnd);
+    if (ce - cs > maxSourceDuration) cs = Math.max(0, ce - maxSourceDuration);
+    return { clipStart: cs, clipEnd: ce };
   };
 
   const chainSegmentBoundaries = (out: SegmentRecord[]): void => {
@@ -212,94 +233,162 @@ export default function TimelineStrip({
     }
   };
 
-  const applyResizeRight = (segmentIndex: number, newCutTime: number): SegmentRecord[] | null => {
+  const applyResizeRightLastSegment = (segmentIndex: number, newCutTime: number): ResizeResult => {
     const segs = segmentsRef.current;
-    if (segmentIndex < 0 || segmentIndex >= segs.length - 1) return null;
+    const srcDur = segmentSourceDurationsRef.current;
+    if (segmentIndex < 0 || segmentIndex !== segs.length - 1) return null;
+    const a = segs[segmentIndex];
+    const TMin = a.startTime + MIN_CLIP_DURATION;
+    const maxA = srcDur[segmentIndex];
+    const maxTimelineEnd = maxA != null && maxA > 0
+      ? Math.round((a.startTime + maxA) * 100) / 100
+      : a.endTime + 60;
+    let T = Math.round(Math.max(TMin, Math.min(maxTimelineEnd, newCutTime)) * 100) / 100;
+    let hitLimit = false;
+    if (T >= maxTimelineEnd) { T = maxTimelineEnd; hitLimit = true; }
+    // Last segment: only vary clipEnd (right edge of source window); never change clipStart.
+    const clipStartFixed = a.clipStart;
+    let clipEndA = clipStartFixed + (T - a.startTime);
+    if (maxA != null && maxA > 0 && clipEndA > maxA) {
+      clipEndA = maxA;
+      T = Math.round((a.startTime + (clipEndA - clipStartFixed)) * 100) / 100;
+      T = Math.max(TMin, T);
+      hitLimit = true;
+    }
+    if (clipEndA < clipStartFixed) clipEndA = clipStartFixed;
+    const result = segs.map((seg, i) =>
+      i === segmentIndex ? { ...seg, endTime: T, clipStart: clipStartFixed, clipEnd: clipEndA } : seg
+    );
+    chainSegmentBoundaries(result);
+    return { segments: result, hitLimit };
+  };
+
+  const applyResizeRight = (segmentIndex: number, newCutTime: number): ResizeResult => {
+    const segs = segmentsRef.current;
+    const srcDur = segmentSourceDurationsRef.current;
+    if (segmentIndex < 0 || segmentIndex >= segs.length) return null;
+    if (segmentIndex === segs.length - 1) return applyResizeRightLastSegment(segmentIndex, newCutTime);
     const a = segs[segmentIndex];
     const b = segs[segmentIndex + 1];
-    const clipLenB = Math.max(0.05, (b.clipEnd ?? b.clipStart) - b.clipStart);
-    const T =
+    let T =
       Math.round(
-        Math.max(a.startTime + 0.05, Math.min(b.endTime - 0.05, newCutTime)) * 100
+        Math.max(a.startTime + MIN_CLIP_DURATION, Math.min(b.endTime - MIN_CLIP_DURATION, newCutTime)) * 100
       ) / 100;
+    let hitLimit = false;
+    const maxA = srcDur[segmentIndex];
+    debugLog("resize-guard applyResizeRight", { segmentIndex, maxA, segsLength: segs.length });
+    if (maxA != null && maxA > 0) {
+      const maxTimelineEnd = Math.round((a.startTime + maxA) * 100) / 100;
+      if (T > maxTimelineEnd) {
+        T = maxTimelineEnd;
+        hitLimit = true;
+      }
+    }
     const delta = T - a.endTime;
     const clipEndA = a.clipStart + (T - a.startTime);
-    const clipStartB =
-      (b.clipEnd ?? b.clipStart + clipLenB) - (b.endTime - T);
+    const { clipStart: csA, clipEnd: ceA } = clampSegmentToSource(a.clipStart, clipEndA, maxA);
     const result = segs.map((seg, i) => {
-      if (i === segmentIndex) return { ...seg, endTime: T, clipEnd: clipEndA };
+      if (i === segmentIndex) return { ...seg, endTime: T, clipStart: csA, clipEnd: ceA };
       if (i === segmentIndex + 1)
-        return { ...seg, startTime: T, endTime: b.endTime + delta, clipStart: clipStartB };
+        return { ...seg, startTime: T, endTime: b.endTime + delta };
       if (i >= segmentIndex + 2)
         return { ...seg, startTime: seg.startTime + delta, endTime: seg.endTime + delta };
       return seg;
     });
     chainSegmentBoundaries(result);
-    return result;
+    debugLog("resize-guard applyResizeRight result", { segmentIndex, hitLimit, clipEndA: result[segmentIndex]?.clipEnd });
+    return { segments: result, hitLimit };
   };
 
-  const applyResizeRightMoveCut = (segmentIndex: number, timeAtFinger: number): SegmentRecord[] | null => {
+  const applyResizeRightMoveCut = (segmentIndex: number, timeAtFinger: number): ResizeResult => {
     const segs = segmentsRef.current;
+    const srcDur = segmentSourceDurationsRef.current;
     if (segmentIndex < 0 || segmentIndex >= segs.length - 1) return null;
     const a = segs[segmentIndex];
     const b = segs[segmentIndex + 1];
-    const T =
+    let T =
       Math.round(
-        Math.max(a.startTime + 0.05, Math.min(b.endTime - 0.05, timeAtFinger)) * 100
+        Math.max(a.startTime + MIN_CLIP_DURATION, Math.min(b.endTime - MIN_CLIP_DURATION, timeAtFinger)) * 100
       ) / 100;
-    const segDurA = a.endTime - a.startTime;
-    const clipDurA = Math.max(0.05, (a.clipEnd ?? a.clipStart) - a.clipStart);
-    const clipEndA = segDurA > 0
-      ? a.clipStart + ((T - a.startTime) / segDurA) * clipDurA
-      : a.clipStart;
-    const segDurB = b.endTime - b.startTime;
-    const clipDurB = Math.max(0.05, (b.clipEnd ?? b.clipStart) - b.clipStart);
-    const clipStartB =
-      segDurB > 0
-        ? b.clipStart + ((T - b.startTime) / segDurB) * clipDurB
-        : b.clipStart;
+    let hitLimit = false;
+    const maxA = srcDur[segmentIndex];
+    const maxB = srcDur[segmentIndex + 1];
+    debugLog("resize-guard applyResizeRightMoveCut", { segmentIndex, maxA, maxB });
+    // Absolute deltas: clip boundaries move by the same amount as timeline boundaries.
+    // Cap T so A's clip range doesn't exceed source duration.
+    if (maxA != null && maxA > 0) {
+      const maxT = Math.round((a.endTime + (maxA - a.clipEnd)) * 100) / 100;
+      if (T > maxT) { T = Math.min(b.endTime - MIN_CLIP_DURATION, maxT); hitLimit = true; }
+    }
+
+    let clipEndA = a.clipEnd + (T - a.endTime);
+    if (clipEndA < 0) clipEndA = 0;
+    let clipStartB = b.clipStart + (T - b.startTime);
+    if (clipStartB < 0) clipStartB = 0;
+
+    const BSegDur = b.endTime - T;
+    if (maxB != null && maxB > 0 && clipStartB + BSegDur > maxB) {
+      clipStartB = Math.max(0, maxB - BSegDur);
+      hitLimit = true;
+    }
+    const { clipStart: csA, clipEnd: ceA } = clampSegmentToSource(a.clipStart, clipEndA, maxA);
     const result = segs.map((seg, i) => {
-      if (i === segmentIndex) return { ...seg, endTime: T, clipEnd: clipEndA };
+      if (i === segmentIndex) return { ...seg, endTime: T, clipStart: csA, clipEnd: ceA };
       if (i === segmentIndex + 1) return { ...seg, startTime: T, clipStart: clipStartB };
       return seg;
     });
     chainSegmentBoundaries(result);
-    return result;
+    debugLog("resize-guard applyResizeRightMoveCut result", { segmentIndex, hitLimit, clipEndA });
+    return { segments: result, hitLimit };
   };
 
-  const applyResizeLeftMoveCut = (segmentIndex: number, timeAtFinger: number): SegmentRecord[] | null => {
+  const applyResizeLeftMoveCut = (segmentIndex: number, timeAtFinger: number): ResizeResult => {
     const segs = segmentsRef.current;
+    const srcDur = segmentSourceDurationsRef.current;
     if (segmentIndex <= 0 || segmentIndex >= segs.length) return null;
     const prev = segs[segmentIndex - 1];
     const curr = segs[segmentIndex];
-    const T =
+    let T =
       Math.round(
-        Math.max(prev.startTime + 0.05, Math.min(curr.endTime - 0.05, timeAtFinger)) * 100
+        Math.max(prev.startTime + MIN_CLIP_DURATION, Math.min(curr.endTime - MIN_CLIP_DURATION, timeAtFinger)) * 100
       ) / 100;
-    const prevSegDur = curr.startTime - prev.startTime;
-    const prevClipDur = Math.max(0.05, (prev.clipEnd ?? prev.clipStart) - prev.clipStart);
-    const clipEndPrev =
-      prevSegDur > 0
-        ? prev.clipStart + ((T - prev.startTime) / prevSegDur) * prevClipDur
-        : prev.clipStart;
-    const currSegDur = curr.endTime - curr.startTime;
-    const currClipDur = Math.max(0.05, (curr.clipEnd ?? curr.clipStart) - curr.clipStart);
-    const newCurrSegDur = curr.endTime - T;
-    const clipStartCurr =
-      currSegDur > 0
-        ? curr.clipStart + ((T - curr.startTime) / currSegDur) * currClipDur
-        : curr.clipStart;
-    const clipEndCurr = currSegDur > 0
-      ? clipStartCurr + (newCurrSegDur / currSegDur) * currClipDur
-      : clipStartCurr;
+    let hitLimit = false;
+    const maxPrev = srcDur[segmentIndex - 1];
+    const maxCurr = srcDur[segmentIndex];
+    debugLog("resize-guard applyResizeLeftMoveCut", { segmentIndex, maxPrev, maxCurr });
+    // Absolute deltas: clip boundaries move by same amount as timeline boundaries.
+    // Cap T so prev's clip range doesn't exceed source duration.
+    if (maxPrev != null && maxPrev > 0) {
+      const maxT = Math.round((curr.startTime + (maxPrev - prev.clipEnd)) * 100) / 100;
+      if (T > Math.min(curr.endTime - MIN_CLIP_DURATION, maxT)) { T = Math.min(curr.endTime - MIN_CLIP_DURATION, maxT); hitLimit = true; }
+    }
+    if (maxPrev != null && maxPrev > 0 && (T - prev.startTime) > maxPrev) {
+      T = Math.round((prev.startTime + maxPrev) * 100) / 100;
+      T = Math.max(prev.startTime + MIN_CLIP_DURATION, Math.min(curr.endTime - MIN_CLIP_DURATION, T));
+      hitLimit = true;
+    }
+
+    let clipEndPrev = prev.clipEnd + (T - curr.startTime);
+    if (clipEndPrev < 0) clipEndPrev = 0;
+    let clipStartCurr = curr.clipStart + (T - curr.startTime);
+    if (clipStartCurr < 0) clipStartCurr = 0;
+    let clipEndCurr = curr.clipEnd;
+    if (maxCurr != null && maxCurr > 0 && clipEndCurr > maxCurr) {
+      clipEndCurr = maxCurr;
+      hitLimit = true;
+    }
+    let currEndTime = curr.endTime;
+    const { clipStart: _csPrev, clipEnd: cePrev } = clampSegmentToSource(prev.clipStart, clipEndPrev, maxPrev);
+    const { clipStart: csCurr, clipEnd: ceCurr } = clampSegmentToSource(clipStartCurr, clipEndCurr, maxCurr);
     const result = segs.map((seg, i) => {
-      if (i === segmentIndex - 1) return { ...seg, endTime: T, clipEnd: clipEndPrev };
+      if (i === segmentIndex - 1) return { ...seg, endTime: T, clipEnd: cePrev };
       if (i === segmentIndex)
-        return { ...seg, startTime: T, clipStart: clipStartCurr, clipEnd: clipEndCurr };
+        return { ...seg, startTime: T, endTime: currEndTime, clipStart: csCurr, clipEnd: ceCurr };
       return seg;
     });
     chainSegmentBoundaries(result);
-    return result;
+    debugLog("resize-guard applyResizeLeftMoveCut result", { segmentIndex, hitLimit });
+    return { segments: result, hitLimit };
   };
 
   const applyResizeLeft = (
@@ -312,26 +401,70 @@ export default function TimelineStrip({
       startClipEnd: number;
       startSegments: SegmentRecord[];
     }
-  ): SegmentRecord[] | null => {
+  ): ResizeResult => {
     const segs = gestureStart.startSegments;
+    const srcDur = segmentSourceDurationsRef.current;
     if (segmentIndex < 0 || segmentIndex >= segs.length) return null;
 
     const clampedTime =
       Math.round(
         Math.max(
           gestureStart.startStartTime - 60,
-          Math.min(gestureStart.startEndTime - 0.05, timeAtFinger)
+          Math.min(gestureStart.startEndTime - MIN_CLIP_DURATION, timeAtFinger)
         ) * 100
       ) / 100;
 
     const delta = gestureStart.startStartTime - clampedTime;
-
-    const newEndTime =
+    let newEndTime =
       Math.round((gestureStart.startEndTime + delta) * 100) / 100;
+    const startTime = gestureStart.startStartTime;
+    const maxCurr = srcDur[segmentIndex];
+    if (maxCurr != null && maxCurr > 0) {
+      const maxTimelineEnd = Math.round((startTime + maxCurr) * 100) / 100;
+      if (newEndTime > maxTimelineEnd) { newEndTime = maxTimelineEnd; }
+    }
+    const segmentDuration = newEndTime - startTime;
 
-    const clipStart = gestureStart.startClipStart + delta;
-    const clipEnd = gestureStart.startClipEnd + delta;
+    // Expand left: show more from start of source → clipEnd fixed, clipStart decreases as segment gets longer.
+    let clipEnd = gestureStart.startClipEnd;
+    let clipStart = clipEnd - segmentDuration;
+    let hitLimit = false;
+    debugLog("resize-guard applyResizeLeft", { segmentIndex, maxCurr });
 
+    if (segmentIndex === 0) {
+      // First segment: left edge fixed at timeline 0. Only vary clipStart (show more/less from start); never augment clipEnd.
+      const maxClipEnd = maxCurr != null && maxCurr > 0 ? maxCurr : gestureStart.startClipEnd;
+      clipEnd = Math.min(gestureStart.startClipEnd, maxClipEnd);
+      clipStart = Math.max(0, clipEnd - segmentDuration);
+      if (clipStart === 0 && clipEnd - 0 < segmentDuration) hitLimit = true;
+      newEndTime = Math.round((startTime + (clipEnd - clipStart)) * 100) / 100;
+    } else {
+      if (clipStart < 0) {
+        clipStart = 0;
+        if (maxCurr != null && maxCurr > 0 && clipEnd > maxCurr) clipEnd = maxCurr;
+        newEndTime = Math.round((startTime + (clipEnd - clipStart)) * 100) / 100;
+        hitLimit = true;
+      }
+      if (maxCurr != null && maxCurr > 0 && clipEnd > maxCurr) {
+        clipEnd = maxCurr;
+        clipStart = Math.max(0, clipEnd - segmentDuration);
+        hitLimit = true;
+      }
+      if (maxCurr != null && maxCurr > 0) {
+        const maxSegDur = clipEnd - clipStart;
+        if (newEndTime - startTime > maxSegDur) {
+          newEndTime = Math.round((startTime + maxSegDur) * 100) / 100;
+          clipStart = clipEnd - maxSegDur;
+          hitLimit = true;
+        }
+      }
+    }
+    const { clipStart: finalClipStart, clipEnd: finalClipEnd } =
+      segmentIndex === 0
+        ? { clipStart: clipStart, clipEnd: clipEnd }
+        : clampSegmentToSource(clipStart, clipEnd, maxCurr);
+
+    const shift = newEndTime - gestureStart.startEndTime;
     const result = segs.map((seg, i) => {
       if (i < segmentIndex) return seg;
 
@@ -340,19 +473,20 @@ export default function TimelineStrip({
           ...seg,
           startTime: gestureStart.startStartTime,
           endTime: newEndTime,
-          clipStart,
-          clipEnd,
+          clipStart: finalClipStart,
+          clipEnd: finalClipEnd,
         };
       }
 
       return {
         ...seg,
-        startTime: seg.startTime + delta,
-        endTime: seg.endTime + delta,
+        startTime: seg.startTime + shift,
+        endTime: seg.endTime + shift,
       };
     });
     chainSegmentBoundaries(result);
-    return result;
+    debugLog("resize-guard applyResizeLeft result", { segmentIndex, hitLimit, clipEnd: result[segmentIndex]?.clipEnd });
+    return { segments: result, hitLimit };
   };
 
   const handleTouchStart = (e: NativeSyntheticEvent<NativeTouchEvent>) => {
@@ -362,12 +496,12 @@ export default function TimelineStrip({
     const x = getStripX(e);
     if (stripWidth <= 0 || totalDuration <= 0) return;
 
-    const playheadX = timeToX(playheadTime);
+    const playheadX = timeToX(playheadTimeRef.current);
     const sel = selectedSegmentIndex;
 
-    const leftEdgeSel = sel != null && sel > 0 ? stripLayout.leftEdges[sel] ?? 0 : null;
+    const leftEdgeSel = sel != null ? stripLayout.leftEdges[sel] ?? 0 : null;
     const rightEdgeSel =
-      sel != null && sel < segments.length - 1
+      sel != null
         ? (stripLayout.leftEdges[sel] ?? 0) + (stripLayout.blockWidths[sel] ?? 0)
         : null;
     debugLog("touchStart", {
@@ -375,13 +509,13 @@ export default function TimelineStrip({
       stripWidth,
       playheadX,
       selectedIndex: sel,
-      leftZone: leftEdgeSel != null ? [leftEdgeSel, leftEdgeSel + RESIZE_EDGE_WIDTH] : null,
-      rightZone: rightEdgeSel != null ? [rightEdgeSel - RESIZE_EDGE_WIDTH, rightEdgeSel] : null,
+      leftZone: leftEdgeSel != null ? [leftEdgeSel, leftEdgeSel + RESIZE_TOUCH_WIDTH] : null,
+      rightZone: rightEdgeSel != null ? [rightEdgeSel - RESIZE_TOUCH_WIDTH, rightEdgeSel] : null,
     });
 
-    if (sel != null && sel > 0) {
+    if (sel != null) {
       const leftEdge = stripLayout.leftEdges[sel] ?? 0;
-      if (x >= leftEdge && x < leftEdge + RESIZE_EDGE_WIDTH) {
+      if (x >= leftEdge && x < leftEdge + RESIZE_TOUCH_WIDTH) {
         const seg = segments[sel];
         debugLog("gesture", {
           type: "resizeLeft",
@@ -408,14 +542,15 @@ export default function TimelineStrip({
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         } catch (_) {}
         isResizingRef.current = true;
-        onResizeStart?.();
+        onResizeStart?.(sel);
         onScrubbingChange?.(true);
         return;
       }
     }
-    if (sel != null && sel < segments.length - 1) {
+    if (sel != null) {
       const rightEdge = (stripLayout.leftEdges[sel] ?? 0) + (stripLayout.blockWidths[sel] ?? 0);
-      if (x > rightEdge - RESIZE_EDGE_WIDTH && x <= rightEdge) {
+      const isLast = sel === segments.length - 1;
+      if (x > rightEdge - RESIZE_TOUCH_WIDTH && (isLast ? x <= rightEdge + RESIZE_TOUCH_WIDTH : x <= rightEdge)) {
         debugLog("gesture", { type: "resizeRight", segmentIndex: sel });
         gestureRef.current = {
           type: "resizeRight",
@@ -426,7 +561,7 @@ export default function TimelineStrip({
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         } catch (_) {}
         isResizingRef.current = true;
-        onResizeStart?.();
+        onResizeStart?.(sel);
         onScrubbingChange?.(true);
         return;
       }
@@ -442,11 +577,13 @@ export default function TimelineStrip({
   };
 
   const handleTouchMove = (e: NativeSyntheticEvent<NativeTouchEvent>) => {
-    const x = getStripX(e);
-    if (x < 0 || x > stripWidth) {
+    const rawX = getStripX(e);
+    const g = gestureRef.current;
+    const isResize = g.type === "resizeLeft" || g.type === "resizeRight";
+    const x = isResize ? rawX : Math.max(0, Math.min(stripWidth, rawX));
+    if (!isResize && (rawX < -20 || rawX > stripWidth + 20)) {
       return;
     }
-    const g = gestureRef.current;
 
     if (g.type === "scrub") {
       const t = xToTime(x);
@@ -457,8 +594,9 @@ export default function TimelineStrip({
       const segs = segmentsRef.current;
       const currentSeg = segs[g.segmentIndex];
       const timeAtFinger = xToTime(x);
-      const next =
-        resizeMode === "moveCut"
+      const useMoveCut = resizeMode === "moveCut" && g.segmentIndex > 0;
+      const result: ResizeResult =
+        useMoveCut
           ? applyResizeLeftMoveCut(g.segmentIndex, timeAtFinger)
           : g.startStartTime != null &&
               g.startEndTime != null &&
@@ -473,6 +611,7 @@ export default function TimelineStrip({
                 startSegments: g.startSegments,
               })
             : null;
+      const next = result?.segments ?? null;
       const nextSeg = next?.[g.segmentIndex];
       debugLog("resizeMove", {
         type: "resizeLeft",
@@ -493,21 +632,27 @@ export default function TimelineStrip({
           : null,
         willCallCallback: !!next,
       });
-      if (!next) {
-        debugLog("resizeMove", { type: "resizeLeft", segmentIndex: g.segmentIndex, skipped: "applyResizeLeft returned null" });
+      if (!result || !next) {
+        if (!result) {
+          debugLog("resizeMove", { type: "resizeLeft", segmentIndex: g.segmentIndex, skipped: "applyResizeLeft returned null" });
+        }
       } else {
         const cb = onSegmentsChangeRef.current;
         if (cb) {
           cb(next);
         }
-        const seg = next[g.segmentIndex];
-        const newStart = seg?.startTime ?? 0;
-        const newEnd = seg?.endTime ?? 0;
-        if (playheadTime < newStart) {
-          onPlayheadChange(newStart);
-        } else if (playheadTime > newEnd) {
-          onPlayheadChange(newEnd);
+        if (result.hitLimit) {
+          if (!lastHapticAtLimitRef.current) {
+            lastHapticAtLimitRef.current = true;
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          }
+        } else {
+          lastHapticAtLimitRef.current = false;
         }
+        const seg = next[g.segmentIndex];
+        if (!seg) return;
+        const newStart = seg.startTime;
+        onPlayheadChange(newStart + 0.001);
       }
       return;
     }
@@ -515,10 +660,13 @@ export default function TimelineStrip({
       const segs = segmentsRef.current;
       const currentSeg = segs[g.segmentIndex];
       const newT = xToTime(x);
-      const next =
-        resizeMode === "moveCut"
+      const isLastSegment = g.segmentIndex === segs.length - 1;
+      const result: ResizeResult = isLastSegment
+        ? applyResizeRight(g.segmentIndex, newT)
+        : resizeMode === "moveCut"
           ? applyResizeRightMoveCut(g.segmentIndex, newT)
           : applyResizeRight(g.segmentIndex, newT);
+      const next = result?.segments ?? null;
       const nextSeg = next?.[g.segmentIndex];
       debugLog("resizeMove", {
         type: "resizeRight",
@@ -539,8 +687,10 @@ export default function TimelineStrip({
           : null,
         willCallCallback: !!next,
       });
-      if (!next) {
-        debugLog("resizeMove", { type: "resizeRight", segmentIndex: g.segmentIndex, skipped: "applyResizeRight returned null" });
+      if (!result || !next) {
+        if (!result) {
+          debugLog("resizeMove", { type: "resizeRight", segmentIndex: g.segmentIndex, skipped: "applyResizeRight returned null" });
+        }
       } else {
         const cb = onSegmentsChangeRef.current;
         if (cb) {
@@ -548,11 +698,20 @@ export default function TimelineStrip({
         } else {
           debugLog("error", { msg: "onSegmentsChange ref is null" });
         }
-        const cutTime = currentSeg?.endTime ?? 0;
-        const delta = newT - cutTime;
-        if (playheadTime >= cutTime) {
-          onPlayheadChange(playheadTime + delta);
+        if (result.hitLimit) {
+          if (!lastHapticAtLimitRef.current) {
+            lastHapticAtLimitRef.current = true;
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          }
+        } else {
+          lastHapticAtLimitRef.current = false;
         }
+        const nextSeg = next[g.segmentIndex];
+        if (!nextSeg) return;
+        const segDur = nextSeg.endTime - nextSeg.startTime;
+        const insideEpsilon = Math.min(0.05, Math.max(0.02, segDur * 0.1));
+        const cutTime = Math.max(nextSeg.endTime - insideEpsilon, nextSeg.startTime + 0.01);
+        onPlayheadChange(cutTime);
       }
       return;
     }
@@ -565,6 +724,8 @@ export default function TimelineStrip({
     }
     if (g.type === "resizeLeft" || g.type === "resizeRight") {
       isResizingRef.current = false;
+      lastHapticAtLimitRef.current = false;
+      onScrubbingChange?.(false);
       onResizeEnd?.();
     }
     if (g.type === "tap" && g.tapStartX != null) {
@@ -589,8 +750,27 @@ export default function TimelineStrip({
     gestureRef.current = { type: "idle" };
   };
 
+  const halfViewport = timelineViewportWidth / 2;
+
+  const scrollZoneGestureRef = useRef<"scrub" | "zoom" | null>(null);
+  const scrollZoneStartPageX = useRef(0);
+  const scrollZoneStartPlayheadTime = useRef(0);
+  const zoomInitialDistanceRef = useRef(0);
+  const zoomInitialSecondsPerViewportRef = useRef(secondsPerViewport);
+  const scrollZoneLastMoveTime = useRef<number | null>(null);
+  const scrollZoneLastTime = useRef(0);
+  const scrollZoneVelocity = useRef(0);
+  const inertiaRafRef = useRef<number | null>(null);
+  const inertiaPlayheadRef = useRef(0);
+
+  const pxToTime = (px: number) => (stripWidth > 0 ? (px / stripWidth) * totalDuration : 0);
+
   const handleScrollZoneTouchStart = (e: NativeSyntheticEvent<NativeTouchEvent>) => {
     const touches = e.nativeEvent.touches;
+    if (inertiaRafRef.current != null) {
+      cancelAnimationFrame(inertiaRafRef.current);
+      inertiaRafRef.current = null;
+    }
     if (touches.length >= 2) {
       scrollZoneGestureRef.current = "zoom";
       const d = Math.hypot(
@@ -600,14 +780,13 @@ export default function TimelineStrip({
       zoomInitialDistanceRef.current = d;
       zoomInitialSecondsPerViewportRef.current = secondsPerViewport;
     } else if (touches.length === 1) {
-      scrollZoneGestureRef.current = "scroll";
-      scrollTrackStartScrollX.current = timelineScrollX;
-      scrollTrackStartPageX.current = touches[0].pageX;
+      scrollZoneGestureRef.current = "scrub";
+      scrollZoneStartPageX.current = touches[0].pageX;
+      scrollZoneStartPlayheadTime.current = playheadTimeRef.current;
       scrollZoneLastMoveTime.current = null;
-      if (inertiaRafRef.current != null) {
-        cancelAnimationFrame(inertiaRafRef.current);
-        inertiaRafRef.current = null;
-      }
+      scrollZoneLastTime.current = playheadTimeRef.current;
+      scrollZoneVelocity.current = 0;
+      onScrubbingChange?.(true);
     }
   };
 
@@ -624,127 +803,70 @@ export default function TimelineStrip({
         Math.min(SECONDS_PER_VIEWPORT_MAX, zoomInitialSecondsPerViewportRef.current - delta)
       );
       onSecondsPerViewportChange(newSPV);
-    } else if (scrollZoneGestureRef.current === "scroll" && touches.length === 1) {
-      const dx = touches[0].pageX - scrollTrackStartPageX.current;
-      const nextX = Math.max(
-        0,
-        Math.min(maxTimelineScroll, scrollTrackStartScrollX.current - dx)
-      );
+    } else if (scrollZoneGestureRef.current === "scrub" && touches.length === 1) {
+      const dx = touches[0].pageX - scrollZoneStartPageX.current;
+      const dt = pxToTime(-dx);
+      const newTime = Math.max(0, Math.min(totalDuration, scrollZoneStartPlayheadTime.current + dt));
       const now = Date.now();
       if (scrollZoneLastMoveTime.current != null) {
-        const dt = now - scrollZoneLastMoveTime.current;
-        if (dt > 0) {
-          const prevX = scrollZoneLastScrollX.current;
-          scrollZoneVelocity.current = (nextX - prevX) / dt;
+        const elapsed = now - scrollZoneLastMoveTime.current;
+        if (elapsed > 0) {
+          scrollZoneVelocity.current = (newTime - scrollZoneLastTime.current) / elapsed;
         }
       }
-      scrollZoneLastScrollX.current = nextX;
+      scrollZoneLastTime.current = newTime;
       scrollZoneLastMoveTime.current = now;
-      onTimelineScrollChange(nextX);
-      timelineScrollRef.current?.scrollTo({ x: nextX, animated: false });
-      showScrollTrack();
+      onPlayheadChange(newTime);
     }
   };
 
-  const maxTimelineScroll = Math.max(0, stripWidth - timelineViewportWidth);
-  const scrollTrackStartScrollX = useRef(0);
-  const scrollTrackStartPageX = useRef(0);
-  const scrollZoneGestureRef = useRef<"scroll" | "zoom" | null>(null);
-  const zoomInitialDistanceRef = useRef(0);
-  const zoomInitialSecondsPerViewportRef = useRef(secondsPerViewport);
-  const scrollZoneLastMoveTime = useRef<number | null>(null);
-  const scrollZoneLastScrollX = useRef(0);
-  const scrollZoneVelocity = useRef(0);
-  const inertiaScrollXRef = useRef(0);
-  const inertiaRafRef = useRef<number | null>(null);
-
   const handleScrollZoneTouchEnd = () => {
-    const wasScroll = scrollZoneGestureRef.current === "scroll";
+    const wasScrub = scrollZoneGestureRef.current === "scrub";
     const velocity = scrollZoneVelocity.current;
     scrollZoneGestureRef.current = null;
     scrollZoneLastMoveTime.current = null;
 
-    if (wasScroll && maxTimelineScroll > 0 && Math.abs(velocity) >= SCROLL_INERTIA_VELOCITY_THRESHOLD) {
-      if (inertiaRafRef.current != null) cancelAnimationFrame(inertiaRafRef.current);
-      let v = velocity;
-      inertiaScrollXRef.current = timelineScrollX;
-      const max = maxTimelineScroll;
-      let lastTime = Date.now();
+    if (wasScrub) {
+      const velThreshold = totalDuration > 0 ? 0.0001 * totalDuration : 0.001;
+      if (Math.abs(velocity) >= velThreshold) {
+        if (inertiaRafRef.current != null) cancelAnimationFrame(inertiaRafRef.current);
+        let v = velocity;
+        inertiaPlayheadRef.current = scrollZoneLastTime.current;
+        let lastTime = Date.now();
 
-      const tick = () => {
-        const now = Date.now();
-        const dt = Math.min(now - lastTime, 50);
-        lastTime = now;
-        let x = inertiaScrollXRef.current;
-        x += v * dt;
-        v *= SCROLL_INERTIA_DECAY;
-        if (x < 0) {
-          x = 0;
-          v = 0;
-        } else if (x > max) {
-          x = max;
-          v = 0;
-        }
-        inertiaScrollXRef.current = x;
-        onTimelineScrollChange(x);
-        timelineScrollRef.current?.scrollTo({ x, animated: false });
-        showScrollTrack();
-        if (Math.abs(v) >= SCROLL_INERTIA_MIN_VELOCITY) {
-          inertiaRafRef.current = requestAnimationFrame(tick);
-        } else {
-          inertiaRafRef.current = null;
-        }
-      };
-      inertiaRafRef.current = requestAnimationFrame(tick);
+        const tick = () => {
+          const now = Date.now();
+          const dt = Math.min(now - lastTime, 50);
+          lastTime = now;
+          let t = inertiaPlayheadRef.current + v * dt;
+          v *= SCROLL_INERTIA_DECAY;
+          if (t < 0) { t = 0; v = 0; }
+          else if (t > totalDuration) { t = totalDuration; v = 0; }
+          inertiaPlayheadRef.current = t;
+          onPlayheadChange(t);
+          const minV = totalDuration > 0 ? 0.00002 * totalDuration : 0.0001;
+          if (Math.abs(v) >= minV) {
+            inertiaRafRef.current = requestAnimationFrame(tick);
+          } else {
+            inertiaRafRef.current = null;
+            onScrubbingChange?.(false);
+          }
+        };
+        inertiaRafRef.current = requestAnimationFrame(tick);
+      } else {
+        onScrubbingChange?.(false);
+      }
     }
   };
 
   const handleScrollZoneTouchCancel = () => {
     scrollZoneGestureRef.current = null;
     scrollZoneLastMoveTime.current = null;
+    onScrubbingChange?.(false);
     if (inertiaRafRef.current != null) {
       cancelAnimationFrame(inertiaRafRef.current);
       inertiaRafRef.current = null;
     }
-  };
-
-  const scrollTrackOpacity = useRef(new Animated.Value(0)).current;
-  const scrollTrackHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const showScrollTrack = () => {
-    if (scrollTrackHideTimeoutRef.current) {
-      clearTimeout(scrollTrackHideTimeoutRef.current);
-      scrollTrackHideTimeoutRef.current = null;
-    }
-    Animated.timing(scrollTrackOpacity, {
-      toValue: 1,
-      duration: 40,
-      useNativeDriver: true,
-    }).start();
-    scrollTrackHideTimeoutRef.current = setTimeout(() => {
-      scrollTrackHideTimeoutRef.current = null;
-      Animated.timing(scrollTrackOpacity, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
-    }, 1000);
-  };
-
-  const handleScrollTrackStart = (e: NativeSyntheticEvent<NativeTouchEvent>) => {
-    scrollTrackStartScrollX.current = timelineScrollX;
-    scrollTrackStartPageX.current = e.nativeEvent.pageX;
-    showScrollTrack();
-  };
-  const handleScrollTrackMove = (e: NativeSyntheticEvent<NativeTouchEvent>) => {
-    const dx = e.nativeEvent.pageX - scrollTrackStartPageX.current;
-    const nextX = Math.max(
-      0,
-      Math.min(maxTimelineScroll, scrollTrackStartScrollX.current - dx)
-    );
-    onTimelineScrollChange(nextX);
-    timelineScrollRef.current?.scrollTo({ x: nextX, animated: false });
-    showScrollTrack();
   };
 
   const formatTime = (seconds: number) => {
@@ -753,72 +875,13 @@ export default function TimelineStrip({
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
 
-  const [showScrubStamp, setShowScrubStamp] = useState(false);
-  const scrubStampOpacity = useRef(new Animated.Value(0)).current;
-  const scrubStampHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const scrubZoneActiveRef = useRef(false);
-
-  const getScrubZoneStripX = (pageX: number) => {
-    const x = pageX - viewportLeftRef.current + timelineScrollX;
-    return Math.max(0, Math.min(stripWidth, x));
-  };
-
-  const handleScrubZoneTouchStart = () => {
-    viewportRef.current?.measureInWindow((x) => {
-      viewportLeftRef.current = x;
-    });
-    if (stripWidth <= 0 || totalDuration <= 0) return;
-    if (scrubStampHideTimeoutRef.current) {
-      clearTimeout(scrubStampHideTimeoutRef.current);
-      scrubStampHideTimeoutRef.current = null;
-    }
-    scrubZoneActiveRef.current = true;
-    onScrubbingChange?.(true);
-    setShowScrubStamp(true);
-    Animated.timing(scrubStampOpacity, { toValue: 1, duration: 150, useNativeDriver: true }).start();
-  };
-
-  const handleScrubZoneTouchMove = (e: NativeSyntheticEvent<NativeTouchEvent>) => {
-    if (!scrubZoneActiveRef.current || stripWidth <= 0 || totalDuration <= 0) return;
-    const touches = e.nativeEvent.touches;
-    if (touches.length === 0) return;
-    const stripX = getScrubZoneStripX(touches[0].pageX);
-    const t = xToTime(stripX);
-    onPlayheadChange(t);
-  };
-
-  const handleScrubZoneTouchEnd = () => {
-    if (!scrubZoneActiveRef.current) return;
-    scrubZoneActiveRef.current = false;
-    onScrubbingChange?.(false);
-    if (scrubStampHideTimeoutRef.current) clearTimeout(scrubStampHideTimeoutRef.current);
-    scrubStampHideTimeoutRef.current = setTimeout(() => {
-      scrubStampHideTimeoutRef.current = null;
-      Animated.timing(scrubStampOpacity, { toValue: 0, duration: 200, useNativeDriver: true }).start(
-        () => setShowScrubStamp(false)
-      );
-    }, 1000);
-  };
-
-  const handleScrubZoneTouchCancel = () => {
-    scrubZoneActiveRef.current = false;
-    onScrubbingChange?.(false);
-    if (scrubStampHideTimeoutRef.current) clearTimeout(scrubStampHideTimeoutRef.current);
-    scrubStampHideTimeoutRef.current = setTimeout(() => {
-      scrubStampHideTimeoutRef.current = null;
-      Animated.timing(scrubStampOpacity, { toValue: 0, duration: 200, useNativeDriver: true }).start(
-        () => setShowScrubStamp(false)
-      );
-    }, 1000);
-  };
-
   useEffect(() => () => {
-    if (scrubStampHideTimeoutRef.current) clearTimeout(scrubStampHideTimeoutRef.current);
-    if (scrollTrackHideTimeoutRef.current) clearTimeout(scrollTrackHideTimeoutRef.current);
     if (inertiaRafRef.current != null) cancelAnimationFrame(inertiaRafRef.current);
   }, []);
 
   if (segments.length === 0 || totalDuration <= 0) return null;
+
+  const paddedStripWidth = stripWidth + timelineViewportWidth;
 
   return (
     <View style={styles.stripContainer}>
@@ -828,7 +891,7 @@ export default function TimelineStrip({
       </View>
       <View
         ref={viewportRef}
-        style={[styles.timelineScrollView, { minHeight: TIMELINE_BLOCK_HEIGHT }]}
+        style={styles.timelineViewport}
         onLayout={(e) => {
           onTimelineViewportLayout(e.nativeEvent.layout.width);
           viewportRef.current?.measureInWindow((x) => {
@@ -836,30 +899,6 @@ export default function TimelineStrip({
           });
         }}
       >
-        <View
-          style={styles.scrubZone}
-          onTouchStart={handleScrubZoneTouchStart}
-          onTouchMove={handleScrubZoneTouchMove}
-          onTouchEnd={handleScrubZoneTouchEnd}
-          onTouchCancel={handleScrubZoneTouchCancel}
-        >
-          {showScrubStamp && (
-            <Animated.View
-              pointerEvents="none"
-              style={[
-                styles.scrubStamp,
-                {
-                  left: stripWidth > 0 ? timeToX(playheadTime) - timelineScrollX : 0,
-                  opacity: scrubStampOpacity,
-                },
-              ]}
-            >
-              <Text style={styles.scrubStampText} numberOfLines={1}>
-                {formatTime(playheadTime)}
-              </Text>
-            </Animated.View>
-          )}
-        </View>
         <ScrollView
           ref={timelineScrollRef}
           horizontal
@@ -867,21 +906,25 @@ export default function TimelineStrip({
           showsHorizontalScrollIndicator={false}
           style={[styles.timelineScrollViewInner, { height: STRIP_HEIGHT + 4 }]}
           contentContainerStyle={styles.timelineScrollContent}
-          onScroll={(e) => onTimelineScrollChange(e.nativeEvent.contentOffset.x)}
           scrollEventThrottle={32}
         >
           <View
-            style={[styles.frameStripWrap, { width: stripWidth }]}
+            style={[styles.frameStripWrap, { width: paddedStripWidth }]}
             onTouchStart={handleTouchStart}
             onTouchMove={handleTouchMove}
             onTouchEnd={handleTouchEnd}
             onTouchCancel={handleTouchCancel}
           >
-            <View style={[styles.frameStripRow, { gap: BLOCK_GAP }]}>
+            <View style={[styles.frameStripRow, { gap: BLOCK_GAP, marginLeft: halfViewport }]}>
               {segments.map((seg, i) => {
                 const isSelected = selectedSegmentIndex === i;
                 const blockWidth = stripLayout.blockWidths[i] ?? 0;
                 const isLast = i === segments.length - 1;
+                const g = gestureRef.current;
+                const isResizingThis =
+                  (g.type === "resizeLeft" || g.type === "resizeRight") && g.segmentIndex === i;
+                const durationSec = seg.endTime - seg.startTime;
+                const durationLabel = isResizingThis ? `${durationSec.toFixed(1)}s` : null;
                 return (
                   <View
                     key={i}
@@ -891,9 +934,10 @@ export default function TimelineStrip({
                         width: blockWidth,
                         borderRadius: BLOCK_BORDER_RADIUS,
                         borderWidth: isSelected ? 1 : 0,
-                        borderLeftWidth: isSelected ? RESIZE_EDGE_WIDTH : 0,
-                        borderRightWidth: isSelected ? RESIZE_EDGE_WIDTH : isLast ? 0 : 1,
+                        borderLeftWidth: isSelected ? RESIZE_BORDER_WIDTH : 0,
+                        borderRightWidth: isSelected ? RESIZE_BORDER_WIDTH : isLast ? 0 : 1,
                         borderColor: "#6366f1",
+                        position: "relative",
                         ...(isSelected ? {} : { borderRightColor: BLOCK_SEPARATOR_COLOR }),
                       },
                     ]}
@@ -953,19 +997,27 @@ export default function TimelineStrip({
                         return <View style={styles.thumbPlaceholder} />;
                       })()}
                     </View>
+                    {durationLabel != null && (
+                      <View
+                        style={[
+                          styles.durationLabelOverlay,
+                          g.type === "resizeRight"
+                            ? { right: 0, left: undefined, alignItems: "flex-end" }
+                            : { left: 0, right: undefined, alignItems: "flex-start" },
+                        ]}
+                        pointerEvents="none"
+                      >
+                        <Text style={styles.durationLabelText}>{durationLabel}</Text>
+                      </View>
+                    )}
                   </View>
                 );
               })}
             </View>
-            <View
-              style={[
-                styles.stripPlayhead,
-                { left: stripWidth > 0 ? timeToX(playheadTime) - 2 : 0 },
-              ]}
-              pointerEvents="none"
-            />
           </View>
         </ScrollView>
+        {/* Fixed centered playhead line */}
+        <View style={[styles.centeredPlayhead, { left: halfViewport - 1.5 }]} pointerEvents="none" />
         <View
           style={styles.scrollZone}
           onTouchStart={handleScrollZoneTouchStart}
@@ -973,35 +1025,12 @@ export default function TimelineStrip({
           onTouchEnd={handleScrollZoneTouchEnd}
           onTouchCancel={handleScrollZoneTouchCancel}
         />
-        {maxTimelineScroll > 0 && (
-          <Animated.View
-            style={[styles.scrollTrack, { opacity: scrollTrackOpacity }]}
-            onTouchStart={handleScrollTrackStart}
-            onTouchMove={handleScrollTrackMove}
-          >
-            <View
-              style={[
-                styles.scrollTrackThumb,
-                (() => {
-                  const trackInner = Math.max(0, timelineViewportWidth - 16);
-                  const thumbW = Math.max(
-                    40,
-                    (timelineViewportWidth / stripWidth) * trackInner
-                  );
-                  const thumbLeft =
-                    trackInner > thumbW
-                      ? 8 + (timelineScrollX / maxTimelineScroll) * (trackInner - thumbW)
-                      : 8;
-                  return { width: thumbW, left: thumbLeft };
-                })(),
-              ]}
-            />
-          </Animated.View>
-        )}
       </View>
     </View>
   );
 }
+
+const PLAYHEAD_WIDTH = 3;
 
 const styles = StyleSheet.create({
   stripContainer: {
@@ -1016,49 +1045,30 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   sliderTime: { fontSize: 12, color: "#64748b", minWidth: 36, textAlign: "center" as const },
-  timelineScrollView: { marginBottom: 4 },
-  scrubZone: {
-    height: SCRUB_ZONE_HEIGHT,
-    backgroundColor: "rgba(100, 116, 139, 0.08)",
-    marginBottom: 4,
+  timelineViewport: {
     position: "relative",
   },
-  scrubStamp: {
-    position: "absolute",
-    bottom: 2,
-    transform: [{ translateX: "-50%" }],
-    backgroundColor: "rgba(99, 102, 241, 0.95)",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  scrubStampText: {
-    fontSize: 11,
-    fontWeight: "600",
-    color: "#fff",
-  },
   timelineScrollViewInner: { height: STRIP_HEIGHT + 4 },
+  timelineScrollContent: { flexGrow: 0 },
   scrollZone: {
     height: SCROLL_ZONE_HEIGHT,
-    backgroundColor: "rgba(100, 116, 139, 0.12)",
-    marginTop: 4,
+    backgroundColor: "rgba(100, 116, 139, 0.06)",
+    marginTop: 2,
   },
-  scrollTrack: {
-    height: 14,
-    marginTop: 4,
-    paddingHorizontal: 8,
-    justifyContent: "center",
-    backgroundColor: "rgba(100, 116, 139, 0.15)",
-    borderRadius: 7,
-  },
-  scrollTrackThumb: {
+  centeredPlayhead: {
     position: "absolute",
-    height: 10,
-    top: 2,
-    borderRadius: 5,
-    backgroundColor: "#6366f1",
+    top: -6,
+    bottom: 0,
+    width: PLAYHEAD_WIDTH,
+    backgroundColor: "#fff",
+    zIndex: 10,
+    borderRadius: PLAYHEAD_WIDTH / 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.35,
+    shadowRadius: 2,
+    elevation: 4,
   },
-  timelineScrollContent: { flexGrow: 0 },
   frameStripWrap: {
     height: STRIP_HEIGHT,
     position: "relative",
@@ -1069,8 +1079,6 @@ const styles = StyleSheet.create({
     alignItems: "stretch",
     height: STRIP_HEIGHT,
     position: "absolute",
-    left: 0,
-    right: 0,
     top: 0,
   },
   thumbFrame: {
@@ -1109,13 +1117,19 @@ const styles = StyleSheet.create({
     position: "relative",
     overflow: "hidden",
   },
-  stripPlayhead: {
+  durationLabelOverlay: {
     position: "absolute",
     top: 0,
     bottom: 0,
-    width: 4,
-    backgroundColor: "#6366f1",
-    borderRadius: 2,
-    zIndex: 1,
+    justifyContent: "center",
+    paddingHorizontal: 4,
+    minWidth: 28,
+  },
+  durationLabelText: {
+    fontSize: 10,
+    color: "#fff",
+    textShadowColor: "rgba(0,0,0,0.8)",
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
 });
