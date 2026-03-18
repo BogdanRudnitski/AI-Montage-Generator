@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -6,8 +6,11 @@ import os
 import shutil
 import json
 import re
+import hashlib
+import tempfile
 from typing import List, Optional
 from pathlib import Path
+from urllib.parse import unquote
 import subprocess
 
 app = FastAPI()
@@ -21,7 +24,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ensure upload directories exist
+# Ensure upload directories exist (media = normalized MP4 clips only; see MEDIA_DIR below)
 os.makedirs("uploads/media", exist_ok=True)
 os.makedirs("uploads/songs", exist_ok=True)
 os.makedirs("uploads/final_videos", exist_ok=True)
@@ -30,6 +33,36 @@ os.makedirs("uploads/final_videos", exist_ok=True)
 app.mount("/files/media", StaticFiles(directory="uploads/media"), name="media")
 app.mount("/files/songs", StaticFiles(directory="uploads/songs"), name="songs")
 app.mount("/files/final_videos", StaticFiles(directory="uploads/final_videos"), name="final_videos")
+
+# -------------------------
+# MEDIA: STABLE DETERMINISTIC NAMING, ORIGINAL FORMAT STORED
+# Videos are stored as uploads/media/{stable_id}{original_extension} (e.g. abc123.mov, def456.mp4).
+# No transcoding or conversion: save exactly as received for fast uploads.
+# Stable ID = deterministic from (original_filename + file_size). clipFilename = actual stored filename.
+# -------------------------
+MEDIA_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v')
+MEDIA_DIR = "uploads/media"
+
+
+def media_stable_id(original_filename: str, file_size_bytes: int) -> str:
+    """
+    Single shared sanitization: same input always produces the same stable ID (no extension).
+    Deterministic, collision-safe. Stored filename = stable_id + original_extension.
+    """
+    base = (original_filename or "unnamed").strip()
+    name, ext = os.path.splitext(base)
+    slug = re.sub(r"[^\w\-.]", "_", name.lower())[:80].strip("_") or "clip"
+    hash_input = f"{original_filename}:{file_size_bytes}"
+    hash_part = hashlib.sha256(hash_input.encode()).hexdigest()[:12]
+    return f"{slug}_{hash_part}"
+
+
+def _original_extension(raw_filename: str) -> str:
+    """Preserve original extension for stored file; default .mp4 if missing/invalid."""
+    ext = os.path.splitext((raw_filename or "").strip())[1].lower()
+    if ext and ext in MEDIA_EXTENSIONS:
+        return ext
+    return ".mp4"
 
 # -------------------------
 # FILENAME SANITIZATION
@@ -193,10 +226,10 @@ def compress_video(video_path: str) -> str:
 # -------------------------
 @app.post("/clear-uploads")
 async def clear_uploads():
-    """Clear all media files (not songs)"""
+    """Clear all media files (not songs). Homepage uses this for new session before re-upload."""
     try:
-        shutil.rmtree("uploads/media", ignore_errors=True)
-        os.makedirs("uploads/media", exist_ok=True)
+        shutil.rmtree(MEDIA_DIR, ignore_errors=True)
+        os.makedirs(MEDIA_DIR, exist_ok=True)
         print("✓ Cleared uploads/media folder")
         return {"success": True, "message": "Media folder cleared"}
     except Exception as e:
@@ -204,33 +237,71 @@ async def clear_uploads():
         return {"success": False, "error": str(e)}
 
 # -------------------------
-# UPLOAD SINGLE FILE
+# UPLOAD SINGLE FILE (session upload or preview replacement)
+# Save as received: no transcoding, no ffmpeg. Stored as {stable_id}{original_extension}.
+# Session (homepage): deduplicate=False → always save. Preview replace: deduplicate=True → reuse if exists.
 # -------------------------
 @app.post("/upload-single")
-async def upload_single_file(files: List[UploadFile] = File(...)):
-    """Upload a single media file with compression"""
+async def upload_single_file(
+    files: List[UploadFile] = File(...),
+    deduplicate: str = Form("false"),
+):
+    dedupe = deduplicate.strip().lower() in ("true", "1", "yes")
     saved_files = []
-    
+    os.makedirs(MEDIA_DIR, exist_ok=True)
+
     for f in files:
-        name = f.filename or "unnamed"
-        if not name.strip():
-            name = "unnamed"
-        sanitized_name = sanitize_filename(name)
-        save_path = f"uploads/media/{sanitized_name}"
-        
-        # Save the uploaded file
-        with open(save_path, "wb") as buffer:
-            shutil.copyfileobj(f.file, buffer)
-        
-        print(f"Saved: {save_path}")
-        
-        # Compress videos (handles both compression and H.264 conversion)
-        if save_path.lower().endswith(('.mp4', '.mov', '.m4v', '.avi', '.mkv')):
-            save_path = compress_video(save_path)
-        
-        saved_files.append(Path(save_path).name)
-    
+        raw = (f.filename or "unnamed").strip()
+        ext = _original_extension(raw)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            shutil.copyfileobj(f.file, tmp)
+            tmp_path = tmp.name
+        try:
+            file_size = os.path.getsize(tmp_path)
+            stable_id = media_stable_id(raw, file_size)
+            final_name = stable_id + ext
+            final_path = os.path.join(MEDIA_DIR, final_name)
+
+            if dedupe and os.path.isfile(final_path):
+                print(f"[TRACE] upload-single dedupe: reusing existing {final_name}")
+                saved_files.append(final_name)
+                continue
+
+            shutil.copy2(tmp_path, final_path)
+            print(f"Saved (as received): {final_path}")
+            saved_files.append(final_name)
+        finally:
+            if os.path.isfile(tmp_path):
+                os.unlink(tmp_path)
+
     return {"success": True, "files_saved": saved_files}
+
+
+# -------------------------
+# STABLE ID + EXISTS (for preview replacement: verify before uploading)
+# Same media_stable_id() used here so frontend can ask "does this exact video exist?" by identity.
+# -------------------------
+@app.post("/media-stable-id")
+async def get_media_stable_id(body: dict = Body(...)):
+    """Return stable_id and stored filename (stable_id + original extension) for given filename + file_size."""
+    filename = (body.get("filename") or body.get("original_filename") or "unnamed").strip()
+    file_size = int(body.get("file_size") or body.get("file_size_bytes") or 0)
+    stable_id = media_stable_id(filename, file_size)
+    ext = _original_extension(filename)
+    return {"stable_id": stable_id, "filename": stable_id + ext}
+
+
+@app.get("/media/exists")
+async def media_exists(stable_id: str = Query(..., alias="stable_id")):
+    """Check if a clip with this stable ID already exists (any stored extension). Returns actual filename if exists."""
+    media_path = Path(MEDIA_DIR)
+    if not media_path.is_dir():
+        return {"exists": False, "filename": None}
+    for f in media_path.iterdir():
+        if f.is_file() and f.suffix.lower() in MEDIA_EXTENSIONS and f.stem == stable_id:
+            return {"exists": True, "filename": f.name}
+    return {"exists": False, "filename": None}
+
 
 # -------------------------
 # UPLOAD SONG (NO COMPRESSION)
@@ -261,7 +332,7 @@ async def upload_song(
     def parse_bool(value: str) -> bool:
         return value.lower() in ('true', '1', 'yes')
     
-    # Save options.json with all parameters
+    # Save options.json (AI reads minClipDuration/maxClipDuration for segment generation)
     options_data = {
         "max_duration": int(max_duration),
         "density": density,
@@ -270,7 +341,9 @@ async def upload_song(
         "focus_vocals": parse_bool(focus_vocals),
         "focus_repetitions": parse_bool(focus_repetitions),
         "sync_to_grid": parse_bool(sync_to_grid),
-        "song_filename": song.filename
+        "song_filename": song.filename,
+        "minClipDuration": 0.1,
+        "maxClipDuration": None,
     }
     options_path = "uploads/options.json"
     with open(options_path, "w") as f:
@@ -285,7 +358,7 @@ async def upload_song(
     }
 
 # -------------------------
-# OLD UPLOAD ENDPOINT (KEPT FOR COMPATIBILITY)
+# BATCH UPLOAD (legacy): stable ID + original extension, save as received. Clear media first.
 # -------------------------
 @app.post("/upload")
 async def upload_media(
@@ -299,33 +372,29 @@ async def upload_media(
     focus_repetitions: str = Form("true"),
     sync_to_grid: str = Form("false")
 ):
-    # Clear previous uploads
-    shutil.rmtree("uploads/media", ignore_errors=True)
+    shutil.rmtree(MEDIA_DIR, ignore_errors=True)
     shutil.rmtree("uploads/songs", ignore_errors=True)
-    os.makedirs("uploads/media", exist_ok=True)
+    os.makedirs(MEDIA_DIR, exist_ok=True)
     os.makedirs("uploads/songs", exist_ok=True)
-
     saved_files = []
 
     for f in files:
-        # Sanitize the filename
-        sanitized_name = sanitize_filename(f.filename)
-        save_path = f"uploads/media/{sanitized_name}"
-        
-        print(f"Original filename: {f.filename}")
-        print(f"Sanitized filename: {sanitized_name}")
-        
-        # Save the uploaded file
-        with open(save_path, "wb") as buffer:
-            shutil.copyfileobj(f.file, buffer)
-        
-        print(f"Saved: {save_path}")
-        
-        # Compress videos
-        if save_path.lower().endswith(('.mp4', '.mov', '.m4v', '.avi', '.mkv')):
-            save_path = compress_video(save_path)
-        
-        saved_files.append(Path(save_path).name)
+        raw = (f.filename or "unnamed").strip()
+        ext = _original_extension(raw)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            shutil.copyfileobj(f.file, tmp)
+            tmp_path = tmp.name
+        try:
+            file_size = os.path.getsize(tmp_path)
+            stable_id = media_stable_id(raw, file_size)
+            final_name = stable_id + ext
+            final_path = os.path.join(MEDIA_DIR, final_name)
+            shutil.copy2(tmp_path, final_path)
+            print(f"Saved (as received): {final_path}")
+            saved_files.append(final_name)
+        finally:
+            if os.path.isfile(tmp_path):
+                os.unlink(tmp_path)
 
     song_saved = None
     if song:
@@ -358,6 +427,8 @@ async def upload_media(
     if song_saved:
         options_data["song_filename"] = song_saved
         
+    options_data["minClipDuration"] = 0.1
+    options_data["maxClipDuration"] = None
     options_path = "uploads/options.json"
     with open(options_path, "w") as f:
         json.dump(options_data, f, indent=2)
@@ -371,10 +442,232 @@ async def upload_media(
     }
 
 # -------------------------
-# GENERATE CLIP
+# AI PATHS (run from backend dir, so ../ai is app/ai)
 # -------------------------
-MAIN_AI_SCRIPT = Path("../ai/main.py")
-AI_VENV_PYTHON = Path("../ai/venv/bin/python3")
+AI_DIR = Path(__file__).resolve().parent / ".." / "ai"
+MAIN_AI_SCRIPT = AI_DIR / "main.py"
+ANALYZE_SCRIPT = AI_DIR / "analyze.py"
+COMPUTE_SEGMENTS_SCRIPT = AI_DIR / "compute_segments.py"
+CLIP_MAKER_SCRIPT = AI_DIR / "clip_maker.py"
+AI_VENV_PYTHON = AI_DIR / "venv" / "bin" / "python3"
+ANALYZE_RESULT_FILE = Path("uploads/analyze_result.json")
+ANALYZE_RESULT_FOR_PREVIEW_FILE = Path("uploads/analyze_result_for_preview.json")
+
+
+def _normalize_segment_for_preview(seg: dict) -> dict:
+    """Ensure segment has camelCase keys expected by frontend (same as export uses).
+    Always include clipStart and clipEnd (clip in/out) so 'which part of the clip is used' is never lost."""
+    start_time = float(seg.get("startTime", seg.get("start_time", 0)))
+    end_time = float(seg.get("endTime", seg.get("end_time", 0)))
+    segment_duration = max(0, end_time - start_time)
+    clip_start = seg.get("clipStart", seg.get("clip_start"))
+    clip_end = seg.get("clipEnd", seg.get("clip_end"))
+    if clip_start is None:
+        clip_start = 0.0
+    else:
+        clip_start = float(clip_start)
+    if clip_end is None:
+        clip_end = clip_start + segment_duration
+    else:
+        clip_end = float(clip_end)
+    return {
+        "startTime": start_time,
+        "endTime": end_time,
+        "clipFilename": str(seg.get("clipFilename", seg.get("clip_filename", ""))),
+        "clipStart": clip_start,
+        "clipEnd": clip_end,
+    }
+
+
+@app.post("/analyze")
+async def analyze_only(body: Optional[dict] = Body(None)):
+    """Run audio analysis only; compute segment list. Return JSON for preview. No ffmpeg.
+    Body may include song_filename to force which song to analyze (must match a file in uploads/songs)."""
+    try:
+        print("[TRACE] POST /analyze received", "body=", body)
+        if not AI_VENV_PYTHON.exists():
+            return {"success": False, "error": f"AI Python not found at {AI_VENV_PYTHON}"}
+        options_file = Path("uploads/options.json")
+        if not options_file.exists():
+            return {"success": False, "error": "options.json not found. Upload song first."}
+        with open(options_file) as f:
+            options = json.load(f)
+        print("[TRACE] options.json BEFORE lock:", {k: v for k, v in options.items()})
+        songs_dir = Path("uploads/songs")
+        # Include all files (uploaded names may have no extension, e.g. "Tiktok Kesha" or "Tiktok%20Kesha")
+        existing_songs = [f.name for f in songs_dir.iterdir() if f.is_file()] if songs_dir.exists() else []
+        print("[TRACE] files in uploads/songs:", existing_songs)
+        # If client sent song_filename, lock analysis to that song (avoid using stale/cached cut data from another track)
+        requested_song = body.get("song_filename") if body else None
+        if requested_song:
+            if songs_dir.exists():
+                # Match with URL-decode: options may have "Tiktok%20Kesha", client sends "Tiktok Kesha"
+                def norm(s: str) -> str:
+                    return unquote(str(s)).strip().lower()
+                requested_norm = norm(requested_song)
+                if requested_song in existing_songs:
+                    options["song_filename"] = requested_song
+                    with open(options_file, "w") as f:
+                        json.dump(options, f, indent=2)
+                    print("[TRACE] locked options.song_filename to (exact match):", requested_song)
+                else:
+                    match = next((n for n in existing_songs if norm(n) == requested_norm), None)
+                    if match:
+                        options["song_filename"] = match
+                        with open(options_file, "w") as f:
+                            json.dump(options, f, indent=2)
+                        print("[TRACE] locked options.song_filename to (normalized match):", match, "requested:", requested_song)
+                    else:
+                        print("[TRACE] requested_song not in folder, options unchanged; requested:", requested_song)
+        print("[TRACE] options.json AFTER lock:", {k: v for k, v in options.items()})
+        max_duration = int(options.get("max_duration", 60))
+        env = os.environ.copy()
+        env["MAX_DURATION"] = str(max_duration)
+        # 1) Run analyze.py
+        print("[TRACE] running analyze.py (cwd=%s) ..." % AI_DIR)
+        proc = subprocess.run(
+            [str(AI_VENV_PYTHON), str(ANALYZE_SCRIPT)],
+            cwd=str(AI_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            print("[TRACE] analyze.py stderr:", (proc.stderr or "")[:800])
+            print("[TRACE] analyze.py stdout:", (proc.stdout or "")[:800])
+            return {"success": False, "error": f"analyze failed: {(proc.stderr or proc.stdout or '')[:500]}"}
+        print("[TRACE] analyze.py exit 0; running compute_segments.py ...")
+        # 2) Run compute_segments.py (writes uploads/analyze_result.json and uploads/segments.json)
+        proc2 = subprocess.run(
+            [str(AI_VENV_PYTHON), str(COMPUTE_SEGMENTS_SCRIPT)],
+            cwd=str(AI_DIR),
+            capture_output=True,
+            text=True,
+        )
+        if proc2.returncode != 0:
+            print("[TRACE] compute_segments.py stderr:", (proc2.stderr or "")[:800])
+            print("[TRACE] compute_segments.py stdout:", (proc2.stdout or "")[:800])
+            return {"success": False, "error": f"compute_segments failed: {(proc2.stderr or proc2.stdout or '')[:500]}"}
+        if not ANALYZE_RESULT_FILE.exists():
+            return {"success": False, "error": "analyze_result.json not written"}
+        with open(ANALYZE_RESULT_FILE) as f:
+            data = json.load(f)
+        print("[TRACE] read analyze_result.json: duration=%s bpm=%s segments=%s first_cut=%s" % (
+            data.get("duration"), data.get("bpm"), len(data.get("segments") or []),
+            (data.get("cut_points") or [None])[0],
+        ))
+        # Normalize segments to exact format preview expects (camelCase, same as segments.json for export)
+        raw_segments = data.get("segments") or []
+        segments = [_normalize_segment_for_preview(s) for s in raw_segments]
+        payload = {
+            "success": True,
+            "duration": data.get("duration", 0),
+            "max_duration": data.get("max_duration", max_duration),
+            "bpm": data.get("bpm", 0),
+            "cut_points": data.get("cut_points") or [],
+            "segments": segments,
+        }
+        # Save exact payload sent to client for debugging (compare with segments.json / export result)
+        try:
+            with open(ANALYZE_RESULT_FOR_PREVIEW_FILE, "w") as out:
+                json.dump(payload, out, indent=2)
+            print(f"Wrote {ANALYZE_RESULT_FOR_PREVIEW_FILE} ({len(segments)} segments)")
+        except Exception as e:
+            print(f"Could not write preview debug file: {e}")
+        return payload
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/analyze-result-for-preview")
+async def get_analyze_result_for_preview():
+    """Return the last payload written for preview (for debugging). Compare with segments.json."""
+    if not ANALYZE_RESULT_FOR_PREVIEW_FILE.exists():
+        return {"error": "No preview payload yet. Call POST /analyze first."}
+    with open(ANALYZE_RESULT_FOR_PREVIEW_FILE) as f:
+        return json.load(f)
+
+
+@app.post("/export")
+async def export_video(body: Optional[dict] = Body(None)):
+    """Run clip_maker (ffmpeg). Uses segments from request body if provided, else stored segments.json."""
+    try:
+        raw_segments = (body or {}).get("segments") or []
+        seg_count = len(raw_segments)
+        print(f"[TRACE] /export received: body_keys={list((body or {}).keys())}, segments_count={seg_count}")
+        if raw_segments:
+            total_from_segments = raw_segments[-1].get("endTime", raw_segments[-1].get("end_time"))
+            print(f"[TRACE] /export total duration from last segment endTime: {total_from_segments}")
+            for i, s in enumerate(raw_segments):
+                st = s.get("startTime", s.get("start_time"))
+                et = s.get("endTime", s.get("end_time"))
+                cs = s.get("clipStart", s.get("clip_start"))
+                ce = s.get("clipEnd", s.get("clip_end"))
+                fn = s.get("clipFilename", s.get("clip_filename"))
+                print(f"[TRACE] /export segment[{i}]: startTime={st}, endTime={et}, clipStart={cs}, clipEnd={ce}, clipFilename={fn}")
+        if not AI_VENV_PYTHON.exists():
+            return {"success": False, "error": f"AI Python not found at {AI_VENV_PYTHON}"}
+        segments_file = Path("uploads/segments.json")
+        if body and body.get("segments"):
+            raw = body["segments"]
+            normalized = [_normalize_segment_for_preview(s) for s in raw]
+            with open(segments_file, "w") as f:
+                json.dump(normalized, f, indent=2)
+            print(f"[TRACE] /export wrote segments.json: {len(normalized)} segments, path={segments_file.absolute()}")
+            if normalized:
+                n0 = normalized[0]
+                print(f"[TRACE] /export segments.json first: startTime={n0['startTime']}, endTime={n0['endTime']}, clipStart={n0['clipStart']}, clipEnd={n0['clipEnd']}")
+        else:
+            print(f"[TRACE] /export NOT writing segments (no body or no segments); using existing segments.json")
+        if not segments_file.exists():
+            return {"success": False, "error": "segments.json not found. Call POST /analyze first or send segments in body."}
+        env = os.environ.copy()
+        with open(Path("uploads/options.json")) as f:
+            opts = json.load(f)
+        env["MAX_DURATION"] = str(opts.get("max_duration", 60))
+        final_videos_path = Path("uploads/final_videos")
+        mtime_before = None
+        if final_videos_path.exists():
+            videos_before = [f for f in final_videos_path.iterdir() if f.is_file() and f.suffix.lower() == ".mp4"]
+            if videos_before:
+                mtime_before = max(f.stat().st_mtime for f in videos_before)
+                print(f"[TRACE] /export mtime_before={mtime_before}")
+        print(f"[TRACE] /export starting clip_maker (cwd={AI_DIR}) ...")
+        process = subprocess.Popen(
+            [str(AI_VENV_PYTHON), str(CLIP_MAKER_SCRIPT)],
+            cwd=str(AI_DIR),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        for line in process.stdout:
+            print(line, end="")
+        process.wait()
+        code = process.returncode
+        print(f"[TRACE] /export clip_maker exited with code={code}")
+        if code != 0:
+            return {"success": False, "error": f"clip_maker exited with code {code}"}
+        latest_video = None
+        if final_videos_path.exists():
+            videos = [f for f in final_videos_path.iterdir() if f.is_file() and f.suffix.lower() == ".mp4"]
+            if videos:
+                latest = max(videos, key=lambda x: x.stat().st_mtime)
+                mtime_after = latest.stat().st_mtime
+                if mtime_before is not None and mtime_after <= mtime_before:
+                    print(f"[TRACE] /export no new video (mtime_after={mtime_after} <= mtime_before={mtime_before}); refusing to return stale file")
+                    return {"success": False, "error": "Export did not produce a new video. Try analyzing again, then export."}
+                latest_video = {"name": latest.name, "url": f"/files/final_videos/{latest.name}", "size": latest.stat().st_size}
+                print(f"[TRACE] /export returning latest_video: name={latest.name}, mtime={mtime_after}, total_files={len(videos)}")
+            else:
+                print(f"[TRACE] /export final_videos dir empty, no video to return")
+        else:
+            print(f"[TRACE] /export final_videos path does not exist")
+        return {"success": True, "final_video": latest_video}
+    except Exception as e:
+        print(f"[TRACE] /export exception: {e}")
+        return {"success": False, "error": str(e)}
+
 
 @app.post("/run_ai")
 async def run_ai():

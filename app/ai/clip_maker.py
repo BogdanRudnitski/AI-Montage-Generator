@@ -4,8 +4,6 @@ import os
 import random
 import re
 import shutil
-import librosa
-import soundfile as sf
 import subprocess
 import numpy as np
 
@@ -18,6 +16,42 @@ def _run_ffmpeg(cmd, step_name="ffmpeg"):
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(f"{step_name} failed (code {result.returncode}): {err[:500]}")
+
+def get_media_duration(path: str) -> float:
+    """Fast duration detection (no full audio decode). Uses ffprobe only."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return float((result.stdout or "0").strip() or 0)
+
+def detect_best_encoder() -> str:
+    """Pick best available H.264 encoder (hardware if possible), with safe CPU fallback."""
+    result = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True)
+    encoders = (result.stdout or "").lower()
+
+    if "h264_videotoolbox" in encoders:
+        print("Using Apple VideoToolbox hardware encoder")
+        return "h264_videotoolbox"
+    if "h264_nvenc" in encoders:
+        print("Using NVIDIA NVENC hardware encoder")
+        return "h264_nvenc"
+    if "h264_qsv" in encoders:
+        print("Using Intel QuickSync hardware encoder")
+        return "h264_qsv"
+
+    print("Warning: falling back to CPU encoder libx264")
+    return "libx264"
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent  # adjust if your FastAPI root is different
@@ -36,12 +70,17 @@ MAX_DURATION = int(os.environ.get('MAX_DURATION', '60'))
 # Beat types that should trigger clip changes
 BEAT_CHANGE_TYPES = {'bass_drop', 'vocal_change', 'downbeat'}
 
-# Max time one clip can be held (avoids long "frozen" single-clip segments)
-MAX_SEGMENT_DURATION = 4.0
-# Min segment duration (avoids ffmpeg/zero-length issues)
-MIN_SEGMENT_DURATION = 0.25
+# Duration rules: read from options.json (minClipDuration, maxClipDuration). Defaults used if not set.
+# minClipDuration: match frontend; default 0.1s. maxClipDuration: optional; if null/missing, no max.
+DEFAULT_MIN_CLIP_DURATION = 0.1
 # Same frame rate for every segment so concat doesn't stumble (VFR → CFR)
 SEGMENT_FPS = 30
+# Output montage in portrait (9:16) to avoid black sidebars on mobile
+OUTPUT_WIDTH = 1080
+OUTPUT_HEIGHT = 1920
+OUTPUT_VF = f'scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease,pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2'
+
+VIDEO_ENCODER = detect_best_encoder()
 
 def sanitize_filename(filename: str) -> str:
     """Remove or replace problematic characters in filenames"""
@@ -75,114 +114,198 @@ def sanitize_filename(filename: str) -> str:
     return name + ext
 
 class ClipManager:
-    """Manages video clips and tracks used segments to avoid repetition"""
-    
+    """
+    Manages video clips and segment selection. Improves distribution across videos and
+    avoids reusing the same time region when possible.
+    - Video selection: prefer clips not used in the last few segments (recent history).
+    - Used time ranges: per-video list of (start, end); prefer regions that do not overlap.
+    - Continuation: when reusing the same video, prefer starting near the previous segment end.
+    - Fallback: always fall back to random choice if constraints cannot be satisfied.
+    """
+
+    RECENT_HISTORY_SIZE = 3  # Prefer videos not in the last N segments
+
     def __init__(self, clips_folder):
         self.clips_folder = clips_folder
         self.clips = []
+        # used_ranges: filename -> list of (start, end) in video timeline
         self.clip_usage = {}
         self.last_used_clip = None
+        self.last_used_end = None  # For continuation: end time of last segment in that clip
+        # Recent filenames (last N segments) to spread selection across videos
+        self.recent_filenames = []
         self.load_clips()
-    
+
     def load_clips(self):
         """Load all video clips metadata (no actual loading for speed)"""
         if not os.path.exists(self.clips_folder):
-            print(f"❌ '{self.clips_folder}' folder not found!")
+            print(f"Error: '{self.clips_folder}' folder not found!")
             return
-        
-        video_files = [f for f in os.listdir(self.clips_folder) 
-                      if f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm'))]
-        
+
+        video_files = [f for f in os.listdir(self.clips_folder)
+                       if f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'))]
+
         print(f"🔍 Scanning clips from '{self.clips_folder}'...")
         for video_file in video_files:
             path = os.path.join(self.clips_folder, video_file)
             try:
-                # Get duration using ffprobe (fast)
                 result = subprocess.run([
-                    'ffprobe', '-v', 'error', '-show_entries', 
-                    'format=duration', '-of', 
+                    'ffprobe', '-v', 'error', '-show_entries',
+                    'format=duration', '-of',
                     'default=noprint_wrappers=1:nokey=1', path
                 ], capture_output=True, text=True)
-                
                 duration = float(result.stdout.strip())
-                
-                self.clips.append({
-                    'path': path,
-                    'filename': video_file,
-                    'duration': duration
-                })
+                self.clips.append({'path': path, 'filename': video_file, 'duration': duration})
                 self.clip_usage[video_file] = []
-                print(f"   ✅ {video_file} ({duration:.2f}s)")
+                print(f"   {video_file} ({duration:.2f}s)")
             except Exception as e:
-                print(f"   ❌ Failed to scan {video_file}: {e}")
-        
+                print(f"   Failed to scan {video_file}: {e}")
         print(f"\n📊 Loaded {len(self.clips)} clips\n")
-    
-    def get_segment_info(self, duration, force_new_clip=False):
-        """Get info about which clip and segment to use (no actual clip loading)"""
+
+    def _overlaps_any(self, start: float, end: float, used: list) -> bool:
+        """True if [start, end] overlaps any (used_start, used_end) in used."""
+        for u_start, u_end in used:
+            if not (end <= u_start or start >= u_end):
+                return True
+        return False
+
+    def _choose_clip(self, force_new_clip: bool):
+        """
+        Choose which clip to use. Prefer clips not in recent history.
+        Fallback: full list (random) if no non-recent clips or only one clip.
+        """
         if not self.clips:
             return None
-        
-        # If we need to force a new clip (for beat drops)
-        if force_new_clip and len(self.clips) > 1:
-            available_clips = [c for c in self.clips if c['filename'] != self.last_used_clip]
-            if available_clips:
-                clip_data = random.choice(available_clips)
-            else:
-                clip_data = random.choice(self.clips)
-        else:
-            clip_data = random.choice(self.clips)
-        
-        clip_duration = clip_data['duration']
+        if len(self.clips) == 1:
+            return self.clips[0]
+        recent_set = set(self.recent_filenames)
+        # Prefer clips not used recently (spread across videos)
+        not_recent = [c for c in self.clips if c['filename'] not in recent_set]
+        if force_new_clip and self.last_used_clip is not None:
+            other = [c for c in self.clips if c['filename'] != self.last_used_clip]
+            if other:
+                not_recent = [c for c in not_recent if c['filename'] != self.last_used_clip] if not_recent else other
+        candidates = not_recent if not_recent else self.clips
+        return random.choice(candidates)
+
+    def get_segment_info(self, duration: float, force_new_clip: bool = False):
+        """
+        Get segment info: which clip and which [start, end] in that clip's timeline.
+        Fallback order: 1) video not recent 2) unused time range 3) continuation from last 4) random.
+        Returns dict with path, filename, start, end, duration, clip_duration (for metadata).
+        """
+        if not self.clips:
+            return None
+
+        clip_data = self._choose_clip(force_new_clip)
+        if not clip_data:
+            return None
+
         filename = clip_data['filename']
-        
-        # Try to find unused segment
-        used_segments = self.clip_usage[filename]
-        
-        start_time = 0
-        found_unused = False
-        
-        if clip_duration >= duration:
-            # Try to find unused segment
-            for _ in range(10):
-                max_start = clip_duration - duration
-                start = random.uniform(0, max_start)
-                end = start + duration
-                
-                # Check if this overlaps with used segments
-                is_unused = True
-                for used_start, used_end in used_segments:
-                    if not (end <= used_start or start >= used_end):
-                        is_unused = False
-                        break
-                
-                if is_unused:
-                    start_time = start
-                    found_unused = True
-                    self.clip_usage[filename].append((start, end))
-                    break
-            
-            if not found_unused:
-                # Just use random segment
-                start_time = random.uniform(0, max_start)
-                self.clip_usage[filename].append((start_time, start_time + duration))
-        else:
-            # Clip is shorter, we'll loop it
-            start_time = 0
-        
+        clip_duration = clip_data['duration']
+        used = self.clip_usage[filename]
+        start_time = 0.0
+        end_time = min(duration, clip_duration)
+
+        if clip_duration < duration:
+            # Clip shorter than segment; we'll loop it. Use from 0.
+            self.clip_usage[filename].append((0, clip_duration))
+            self._push_recent(filename)
+            self.last_used_clip = filename
+            self.last_used_end = clip_duration
+            return {
+                'path': clip_data['path'],
+                'filename': filename,
+                'start': 0,
+                'end': clip_duration,
+                'duration': duration,
+                'clip_duration': clip_duration,
+            }
+
+        max_start = clip_duration - duration
+        if max_start <= 0:
+            self._push_recent(filename)
+            self.last_used_clip = filename
+            self.last_used_end = clip_duration
+            return {
+                'path': clip_data['path'],
+                'filename': filename,
+                'start': 0,
+                'end': clip_duration,
+                'duration': duration,
+                'clip_duration': clip_duration,
+            }
+
+        # Prefer unused time range (no overlap with used)
+        for _ in range(25):
+            start = random.uniform(0, max_start)
+            end = start + duration
+            if not self._overlaps_any(start, end, used):
+                start_time = start
+                end_time = end
+                self.clip_usage[filename].append((start_time, end_time))
+                self._push_recent(filename)
+                self.last_used_clip = filename
+                self.last_used_end = end_time
+                return {
+                    'path': clip_data['path'],
+                    'filename': filename,
+                    'start': start_time,
+                    'end': end_time,
+                    'duration': duration,
+                    'clip_duration': clip_duration,
+                }
+
+        # Prefer continuation: start near previous end (same video) when possible
+        if self.last_used_clip == filename and self.last_used_end is not None:
+            cont_start = self.last_used_end
+            if cont_start + duration <= clip_duration:
+                start_time = cont_start
+                end_time = cont_start + duration
+                if not self._overlaps_any(start_time, end_time, used):
+                    self.clip_usage[filename].append((start_time, end_time))
+                    self._push_recent(filename)
+                    self.last_used_clip = filename
+                    self.last_used_end = end_time
+                    return {
+                        'path': clip_data['path'],
+                        'filename': filename,
+                        'start': start_time,
+                        'end': end_time,
+                        'duration': duration,
+                        'clip_duration': clip_duration,
+                    }
+
+        # Fallback: random time in video
+        start_time = random.uniform(0, max_start)
+        end_time = start_time + duration
+        self.clip_usage[filename].append((start_time, end_time))
+        self._push_recent(filename)
         self.last_used_clip = filename
-        
+        self.last_used_end = end_time
         return {
             'path': clip_data['path'],
             'filename': filename,
             'start': start_time,
+            'end': end_time,
             'duration': duration,
-            'clip_duration': clip_duration
+            'clip_duration': clip_duration,
         }
+
+    def _push_recent(self, filename: str):
+        """Append filename to recent history, keep last RECENT_HISTORY_SIZE."""
+        self.recent_filenames.append(filename)
+        if len(self.recent_filenames) > self.RECENT_HISTORY_SIZE:
+            self.recent_filenames.pop(0)
 
 
 def _split_long_segments(timestamps, max_seg_duration):
-    """Insert fake cut points so no segment is longer than max_seg_duration."""
+    """
+    If max_seg_duration is None, return timestamps unchanged (no max clip duration).
+    Otherwise insert fake cut points so no segment is longer than max_seg_duration.
+    """
+    if max_seg_duration is None or max_seg_duration <= 0:
+        return timestamps
     out = [timestamps[0]]
     for i in range(1, len(timestamps)):
         start = out[-1]['timestamp']
@@ -196,51 +319,165 @@ def _split_long_segments(timestamps, max_seg_duration):
     return out
 
 
-def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, max_duration=None):
-    """Create video using direct ffmpeg concat - NO MoviePy for speed"""
-    print(f"\n🎬 Creating video ULTRA FAST...")
+def compute_segments_only(cut_points, duration, clip_manager, max_duration=None,
+                         min_clip_duration=DEFAULT_MIN_CLIP_DURATION, max_clip_duration=None):
+    """
+    Build segment list from cut_points and duration. No ffmpeg.
+    Duration rules: segment_duration >= min_clip_duration (match frontend 0.1s).
+    If max_clip_duration is set, long segments are split; if null/missing, no max.
+    Returns list of { startTime, endTime, clipFilename, clipStart, clipEnd }.
+    """
+    cut_points = sorted(cut_points, key=lambda x: x['timestamp'])
+    cut_points = [p for p in cut_points if p['timestamp'] < duration]
+    timestamps = [{'timestamp': 0, 'type': 'start', 'score': 0}] + cut_points + [{'timestamp': duration, 'type': 'end', 'score': 0}]
+    timestamps = _split_long_segments(timestamps, max_clip_duration)
+    segments = []
+    for i in range(len(timestamps) - 1):
+        start_time = timestamps[i]['timestamp']
+        end_time = timestamps[i + 1]['timestamp']
+        segment_duration = end_time - start_time
+        # Enforce min clip duration (match frontend; avoid zero-length)
+        if segment_duration < min_clip_duration:
+            segment_duration = min_clip_duration
+            end_time = start_time + segment_duration
+        current_point = timestamps[i + 1]
+        force_new_clip = current_point['type'] in BEAT_CHANGE_TYPES and current_point.get('score', 0) >= 20
+        segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=force_new_clip)
+        if not segment_info and clip_manager.clips:
+            segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=False)
+        if not segment_info:
+            raise RuntimeError("No clips available for segment; cannot continue.")
+        clip_start = segment_info['start']
+        clip_end = segment_info.get('end', clip_start + min(segment_duration, segment_info['clip_duration']))
+        segments.append({
+            "startTime": round(start_time, 3),
+            "endTime": round(end_time, 3),
+            "clipFilename": segment_info['filename'],
+            "clipStart": round(clip_start, 3),
+            "clipEnd": round(clip_end, 3),
+        })
+    return segments
+
+
+def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, max_duration=None, precomputed_segments=None,
+                          min_clip_duration=DEFAULT_MIN_CLIP_DURATION, max_clip_duration=None):
+    """Create video using direct ffmpeg concat. Duration rules from options: min_clip_duration, max_clip_duration (optional)."""
+    print("\nCreating video (ultra fast)...")
     print(f"   Audio: {os.path.basename(audio_path)}")
     print(f"   Cut points: {len(cut_points)}")
     
     # Sort cut points by timestamp
     cut_points = sorted(cut_points, key=lambda x: x['timestamp'])
     
-    # Get audio duration
-    y, sr = librosa.load(audio_path, sr=44100, mono=False)
-    full_duration = librosa.get_duration(y=y, sr=sr)
+    # Fast duration detection (no full decode)
+    full_duration = get_media_duration(audio_path)
     
-    # Apply max duration limit
-    if max_duration and max_duration > 0:
-        duration = min(max_duration, full_duration)
-        
-        # Trim audio if needed
+    # Build list of segment specs: either from precomputed_segments or from cut_points + clip_manager
+    segment_specs = []
+    if precomputed_segments:
+        # Resolve clip filename to path via clip_manager
+        filename_to_path = {c['filename']: c['path'] for c in clip_manager.clips}
+        for seg in precomputed_segments:
+            segment_duration = seg['endTime'] - seg['startTime']
+            clip_path = filename_to_path.get(seg['clipFilename'])
+            if not clip_path:
+                raise RuntimeError(f"Precomputed segment references unknown clip: {seg['clipFilename']}")
+            clip_start = seg['clipStart']
+            clip_end = seg['clipEnd']
+            in_clip_duration = clip_end - clip_start
+            segment_specs.append({
+                'clip_path': clip_path,
+                'clip_start': clip_start,
+                'segment_duration': segment_duration,
+                'clip_duration': in_clip_duration,
+            })
+        print(f"Using {len(segment_specs)} precomputed segments...")
+        # Duration = end time of last segment (user's edit), capped by audio length
+        duration_from_segments = precomputed_segments[-1]['endTime']
+        duration = min(duration_from_segments, full_duration)
+        print(f"   Duration from segments: {duration_from_segments:.2f}s (capped by audio: {duration:.2f}s)")
         if duration < full_duration:
-            max_samples = int(duration * sr)
-            if y.ndim == 1:
-                y = y[:max_samples]
-            else:
-                y = y[:, :max_samples]
-            
-            # Save trimmed audio temporarily
-            temp_audio = "temp_trimmed_audio.wav"
-            sf.write(temp_audio, y.T if y.ndim > 1 else y, sr)
+            # Trim audio without decoding to memory (fast, single stream)
+            temp_audio = "temp_trimmed_audio.m4a"
+            _run_ffmpeg(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-t",
+                    str(duration),
+                    "-i",
+                    audio_path,
+                    "-vn",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    temp_audio,
+                ],
+                step_name="trim audio",
+            )
             audio_path = temp_audio
-            
-            print(f"   ⏱️  Generating {duration:.2f}s video (trimmed from {full_duration:.2f}s)\n")
+            print(f"   Audio trimmed to {duration:.2f}s\n")
         else:
             print(f"   Duration: {duration:.2f}s\n")
     else:
-        duration = full_duration
-        print(f"   Duration: {duration:.2f}s\n")
-    
-    # Filter cut points to only those within duration
-    cut_points = [p for p in cut_points if p['timestamp'] < duration]
-    
-    # Build timestamps and split any segment longer than MAX_SEGMENT_DURATION to avoid long freezes
-    timestamps = [{'timestamp': 0, 'type': 'start', 'score': 0}] + cut_points + [{'timestamp': duration, 'type': 'end', 'score': 0}]
-    timestamps = _split_long_segments(timestamps, MAX_SEGMENT_DURATION)
-    
-    print(f"⚡ Generating {len(timestamps)-1} segments (max {MAX_SEGMENT_DURATION}s per clip)...")
+        # Apply max duration limit when not using precomputed segments
+        if max_duration and max_duration > 0:
+            duration = min(max_duration, full_duration)
+            if duration < full_duration:
+                temp_audio = "temp_trimmed_audio.m4a"
+                _run_ffmpeg(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-t",
+                        str(duration),
+                        "-i",
+                        audio_path,
+                        "-vn",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "192k",
+                        temp_audio,
+                    ],
+                    step_name="trim audio",
+                )
+                audio_path = temp_audio
+                print(f"   Generating {duration:.2f}s video (trimmed from {full_duration:.2f}s)\n")
+            else:
+                print(f"   Duration: {duration:.2f}s\n")
+        else:
+            duration = full_duration
+            print(f"   Duration: {duration:.2f}s\n")
+        cut_points = [p for p in cut_points if p['timestamp'] < duration]
+        timestamps = [{'timestamp': 0, 'type': 'start', 'score': 0}] + cut_points + [{'timestamp': duration, 'type': 'end', 'score': 0}]
+        timestamps = _split_long_segments(timestamps, max_clip_duration)
+        max_msg = f" (max {max_clip_duration}s per clip)" if max_clip_duration else ""
+        print(f"Generating {len(timestamps)-1} segments{max_msg}...")
+        for i in range(len(timestamps) - 1):
+            start_time = timestamps[i]['timestamp']
+            end_time = timestamps[i + 1]['timestamp']
+            segment_duration = end_time - start_time
+            if segment_duration < min_clip_duration:
+                segment_duration = min_clip_duration
+                end_time = start_time + segment_duration
+            current_point = timestamps[i + 1]
+            force_new_clip = current_point['type'] in BEAT_CHANGE_TYPES and current_point.get('score', 0) >= 20
+            segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=force_new_clip)
+            if not segment_info and clip_manager.clips:
+                segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=False)
+            if not segment_info:
+                raise RuntimeError("No clips available for segment; cannot continue.")
+            clip_start = segment_info['start']
+            clip_end = segment_info.get('end', clip_start + min(segment_duration, segment_info['clip_duration']))
+            in_clip_duration = clip_end - clip_start
+            segment_specs.append({
+                'clip_path': segment_info['path'],
+                'clip_start': clip_start,
+                'segment_duration': segment_duration,
+                'clip_duration': segment_info['clip_duration'],
+            })
     
     # Wipe temp folder so we never reuse broken/leftover segment files
     temp_folder = "temp_segments"
@@ -251,35 +488,12 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
     segment_files = []
     concat_list = []
     
-    for i in range(len(timestamps) - 1):
-        start_time = timestamps[i]['timestamp']
-        end_time = timestamps[i + 1]['timestamp']
-        segment_duration = end_time - start_time
-        
-        # Enforce minimum to avoid zero/tiny segments that break ffmpeg
-        if segment_duration < MIN_SEGMENT_DURATION:
-            segment_duration = MIN_SEGMENT_DURATION
-            end_time = start_time + segment_duration
-        
-        # Check if this is a major beat
-        current_point = timestamps[i + 1]
-        force_new_clip = current_point['type'] in BEAT_CHANGE_TYPES and current_point.get('score', 0) >= 20
-        
-        if force_new_clip:
-            print(f"   🎵 Beat drop at {current_point['timestamp']:.2f}s - forcing new clip!")
-        
-        # Get segment info; never skip – use first clip as fallback if needed
-        segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=force_new_clip)
-        if not segment_info and clip_manager.clips:
-            segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=False)
-        if not segment_info:
-            raise RuntimeError("No clips available for segment; cannot continue.")
-        
-        # Create segment using ffmpeg (fail fast on error)
+    for i, spec in enumerate(segment_specs):
         segment_output = os.path.join(temp_folder, f"segment_{i:04d}.mp4")
-        clip_path = segment_info['path']
-        clip_start = segment_info['start']
-        clip_duration = segment_info['clip_duration']
+        clip_path = spec['clip_path']
+        clip_start = spec['clip_start']
+        segment_duration = spec['segment_duration']
+        clip_duration = spec['clip_duration']
         
         if clip_duration < segment_duration:
             # Loop short clip and trim to exact duration
@@ -291,27 +505,73 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
             with open(loop_list, 'w') as f:
                 for _ in range(num_loops):
                     f.write(f"file '{safe_path}'\n")
-            # Same FPS + keyframe at start so concat doesn't freeze at boundaries
-            _run_ffmpeg([
-                'ffmpeg', '-f', 'concat', '-safe', '0', '-i', loop_list,
-                '-t', str(segment_duration),
-                '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2',
-                '-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
-                '-r', str(SEGMENT_FPS), '-vsync', 'cfr',
-                '-force_key_frames', 'expr:gte(t,0)',
-                '-an', '-y', segment_output
-            ], step_name=f"segment_{i} (loop)")
+            # Re-encode each segment into a unified CFR/pix_fmt so concat with -c copy stays stable.
+            # No portrait scaling here; scaling happens exactly once during the final export encode.
+            segment_cmd = [
+                "ffmpeg",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                loop_list,
+                "-t",
+                str(segment_duration),
+                "-c:v",
+                VIDEO_ENCODER,
+                "-pix_fmt",
+                "yuv420p",
+                "-r",
+                str(SEGMENT_FPS),
+                "-vsync",
+                "cfr",
+                "-force_key_frames",
+                "expr:gte(t,0)",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-an",
+                "-y",
+                segment_output,
+            ]
+            if VIDEO_ENCODER == "libx264":
+                segment_cmd.extend(["-preset", "medium", "-crf", "23"])
+            else:
+                segment_cmd.extend(["-b:v", "6M", "-maxrate", "8M", "-bufsize", "12M"])
+
+            _run_ffmpeg(segment_cmd, step_name=f"segment_{i} (encode loop)")
         else:
-            # -i then -ss = accurate seek. Same FPS + keyframe at start for clean concat.
-            _run_ffmpeg([
-                'ffmpeg', '-i', clip_path, '-ss', str(clip_start),
-                '-t', str(segment_duration),
-                '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2',
-                '-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
-                '-r', str(SEGMENT_FPS), '-vsync', 'cfr',
-                '-force_key_frames', 'expr:gte(t,0)',
-                '-an', '-y', segment_output
-            ], step_name=f"segment_{i} (extract)")
+            # Encode each segment into a unified CFR/pix_fmt so concat with -c copy stays stable.
+            # No portrait scaling here; scaling happens exactly once during the final export encode.
+            segment_cmd = [
+                "ffmpeg",
+                "-ss",
+                str(clip_start),
+                "-i",
+                clip_path,
+                "-t",
+                str(segment_duration),
+                "-c:v",
+                VIDEO_ENCODER,
+                "-pix_fmt",
+                "yuv420p",
+                "-r",
+                str(SEGMENT_FPS),
+                "-vsync",
+                "cfr",
+                "-force_key_frames",
+                "expr:gte(t,0)",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-an",
+                "-y",
+                segment_output,
+            ]
+            if VIDEO_ENCODER == "libx264":
+                segment_cmd.extend(["-preset", "medium", "-crf", "23"])
+            else:
+                segment_cmd.extend(["-b:v", "6M", "-maxrate", "8M", "-bufsize", "12M"])
+
+            _run_ffmpeg(segment_cmd, step_name=f"segment_{i} (encode extract)")
         
         # Ensure segment was written and has content (catches silent ffmpeg failures)
         if not os.path.exists(segment_output) or os.path.getsize(segment_output) < 1000:
@@ -323,9 +583,9 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         segment_files.append(segment_output)
         
         if (i + 1) % 5 == 0:
-            print(f"   ✅ Created {i+1}/{len(timestamps)-1} segments")
+            print(f"   Created {i+1}/{len(segment_specs)} segments")
     
-    print(f"\n🔗 Concatenating {len(segment_files)} segments...")
+    print(f"\nConcatenating {len(segment_files)} segments...")
     
     concat_file = os.path.join(temp_folder, "concat.txt")
     with open(concat_file, 'w') as f:
@@ -336,26 +596,72 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         'ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_file,
         '-c', 'copy', '-y', temp_video
     ], step_name="concat segments")
+
+    # Single final encode (GPU when available) to:
+    # - apply portrait scaling only once
+    # - normalize CFR (prevents freeze frames / timestamp issues)
+    encoded_video = os.path.join(temp_folder, "video_encoded.mp4")
+    final_encode_cmd = [
+        "ffmpeg",
+        "-i",
+        temp_video,
+        "-t",
+        str(duration),
+        "-vf",
+        OUTPUT_VF,
+        "-c:v",
+        VIDEO_ENCODER,
+    ]
+
+    if VIDEO_ENCODER == "libx264":
+        final_encode_cmd.extend(["-preset", "medium", "-crf", "23"])
+    else:
+        # Hardware encoders: use bitrate-based rate control
+        final_encode_cmd.extend(["-b:v", "6M", "-maxrate", "8M", "-bufsize", "12M"])
+
+    final_encode_cmd.extend(
+        [
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            str(SEGMENT_FPS),
+            "-vsync",
+            "cfr",
+            "-reset_timestamps",
+            "1",
+            "-movflags",
+            "+faststart",
+            "-an",
+            "-y",
+            encoded_video,
+        ]
+    )
+
+    _run_ffmpeg(final_encode_cmd, step_name="final encode (GPU + portrait)")
+
+    print(f"Muxing audio track ({duration:.1f}s)...")
+    _run_ffmpeg(
+        [
+            "ffmpeg",
+            "-i",
+            encoded_video,
+            "-i",
+            audio_path,
+            "-t",
+            str(duration),
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-y",
+            output_path,
+        ],
+        step_name="mux audio",
+    )
     
-    # Re-encode trim to one continuous stream (avoids concat-boundary freezes from -c copy)
-    temp_video_trimmed = os.path.join(temp_folder, "video_trimmed.mp4")
-    _run_ffmpeg([
-        'ffmpeg', '-i', temp_video, '-t', str(duration),
-        '-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
-        '-r', str(SEGMENT_FPS), '-vsync', 'cfr',
-        '-an', '-y', temp_video_trimmed
-    ], step_name="trim and re-encode")
-    
-    print(f"🎵 Adding audio track ({duration:.1f}s)...")
-    
-    _run_ffmpeg([
-        'ffmpeg', '-i', temp_video_trimmed, '-i', audio_path,
-        '-t', str(duration),
-        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
-        '-y', output_path
-    ], step_name="mux audio")
-    
-    print(f"🧹 Cleaning up temporary files...")
+    print("Cleaning up temporary files...")
     
     # Cleanup temp files
     for f in segment_files:
@@ -374,10 +680,10 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         os.rmdir(temp_folder)
     
     # Clean up temp audio if we created one
-    if max_duration and os.path.exists("temp_trimmed_audio.wav"):
-        os.remove("temp_trimmed_audio.wav")
+    if os.path.exists("temp_trimmed_audio.m4a"):
+        os.remove("temp_trimmed_audio.m4a")
     
-    print(f"✅ Video created successfully!\n")
+    print("Video created successfully!\n")
 
 def main():
     """Main function that automatically processes the song specified in options.json"""
@@ -391,23 +697,81 @@ def main():
     audio_folder_abs = os.path.join(project_root, "backend", "uploads", "songs")
     output_folder_abs = os.path.join(project_root, "backend", "uploads", "final_videos")
     options_file = os.path.join(project_root, "backend", "uploads", "options.json")
+    segments_path = os.path.join(os.path.dirname(output_folder_abs), "segments.json")
     
-    # Load options to find which song to process
+    # Load options: song, minClipDuration (default 0.1), maxClipDuration (optional; null = no max)
     target_song = None
+    min_clip_duration = DEFAULT_MIN_CLIP_DURATION
+    max_clip_duration = None
     if os.path.exists(options_file):
         try:
             with open(options_file, 'r') as f:
                 options = json.load(f)
                 target_song = options.get('song_filename')
-                print(f"📋 Loaded options from options.json")
+                min_clip_duration = float(options.get('minClipDuration', min_clip_duration))
+                if options.get('maxClipDuration') is not None:
+                    max_clip_duration = float(options['maxClipDuration'])
+                print("Loaded options from options.json")
                 if target_song:
-                    print(f"   Target song: {target_song}\n")
+                    print(f"   Target song: {target_song}")
+                print(f"   minClipDuration: {min_clip_duration}s, maxClipDuration: {max_clip_duration or 'none'}\n")
         except Exception as e:
-            print(f"⚠️  Error reading options.json: {e}\n")
+            print(f"Error reading options.json: {e}\n")
+    
+    # Export-only path: segments.json was written by POST /export; use it without requiring audio_analysis.json
+    precomputed_segments = None
+    if os.path.exists(segments_path) and target_song:
+        try:
+            with open(segments_path, 'r') as f:
+                precomputed_segments = json.load(f)
+        except Exception as e:
+            print(f"Could not load segments.json: {e}")
+    if precomputed_segments and target_song:
+        print(f"Export-only mode: using {len(precomputed_segments)} segments from segments.json (no analysis required)\n")
+        clip_manager = ClipManager(clips_folder_abs)
+        if not clip_manager.clips:
+            print(f"No video clips found in '{CLIPS_FOLDER}'!\n")
+            return
+        if not os.path.exists(output_folder_abs):
+            os.makedirs(output_folder_abs)
+        # Find audio file (match by name with or without extension)
+        audio_files = [f for f in os.listdir(audio_folder_abs)
+                       if f.lower().endswith(('.mp3', '.wav', '.m4a')) or ('.' not in f and not f.startswith('.'))]
+        base_target = target_song.rsplit('.', 1)[0]
+        audio_path = None
+        for f in audio_files:
+            if f == target_song or f.rsplit('.', 1)[0] == base_target or f == base_target:
+                audio_path = os.path.join(audio_folder_abs, f)
+                break
+        if not audio_path or not os.path.exists(audio_path):
+            print(f"Audio file not found for: {target_song}")
+            print(f"   Searched in: {audio_folder_abs}\n")
+            return
+        video_filename = base_target + '_final.mp4'
+        video_filename = sanitize_filename(video_filename)
+        output_path = os.path.join(output_folder_abs, video_filename)
+        print(f"Export: {target_song} -> {video_filename}\n")
+        try:
+            create_video_ultrafast(
+                audio_path, [], clip_manager, output_path,
+                max_duration=MAX_DURATION,
+                precomputed_segments=precomputed_segments,
+                min_clip_duration=min_clip_duration,
+                max_clip_duration=max_clip_duration,
+            )
+            print("="*60)
+            print(f"Video created in '{OUTPUT_FOLDER}'!")
+            print(f"   Final filename: {video_filename}")
+            print("="*60 + "\n")
+        except Exception as e:
+            print(f"Error creating video: {e}\n")
+            import traceback
+            traceback.print_exc()
+        return
     
     # Check for analysis file
     if not os.path.exists(analysis_json_path):
-        print(f"❌ {ANALYSIS_JSON} not found!")
+        print(f"{ANALYSIS_JSON} not found!")
         print("   Run analyze.py first to analyze audio.\n")
         return
     
@@ -416,7 +780,7 @@ def main():
         results = json.load(f)
     
     if not results:
-        print("❌ No analysis results found!\n")
+        print("No analysis results found!\n")
         return
     
     # Find the song to process
@@ -426,7 +790,7 @@ def main():
         # Look for exact match or the most recent analysis of this song
         if target_song in results:
             selected_song = target_song
-            print(f"✅ Found analysis for: {target_song}\n")
+            print(f"Found analysis for: {target_song}\n")
         else:
             # Check if there's a match without timestamp suffix
             base_name = target_song.rsplit('.', 1)[0]  # Remove extension
@@ -435,26 +799,26 @@ def main():
             if matches:
                 # Get most recent analysis (last in list)
                 selected_song = matches[-1]
-                print(f"✅ Found recent analysis: {selected_song}")
+                print(f"Found recent analysis: {selected_song}")
                 print(f"   (Requested: {target_song})\n")
             else:
-                print(f"❌ No analysis found for: {target_song}")
+                print(f"No analysis found for: {target_song}")
                 print(f"   Available songs: {', '.join(songs)}\n")
                 return
     else:
         # No target specified, use first song
         selected_song = songs[0]
-        print(f"⚠️  No song specified in options.json")
+        print("No song specified in options.json")
         print(f"   Using first available: {selected_song}\n")
     
-    print(f"🎵 Processing: {selected_song}")
-    print(f"⚙️  Using configured MAX_DURATION = {MAX_DURATION}\n")
+    print(f"Processing: {selected_song}")
+    print(f"Using configured MAX_DURATION = {MAX_DURATION}\n")
     
     # Initialize clip manager with absolute path
     clip_manager = ClipManager(clips_folder_abs)
     
     if not clip_manager.clips:
-        print(f"❌ No video clips found in '{CLIPS_FOLDER}'!")
+        print(f"No video clips found in '{CLIPS_FOLDER}'!")
         print(f"   Add .mp4, .mov, .avi, or other video files to the folder.\n")
         return
     
@@ -462,8 +826,8 @@ def main():
     if not os.path.exists(output_folder_abs):
         os.makedirs(output_folder_abs)
     
-    print("🎥 Creating videos from clips and timestamps")
-    print("⚡ ULTRA FAST MODE: Direct ffmpeg processing\n")
+    print("Creating videos from clips and timestamps")
+    print("ULTRA FAST MODE: Direct ffmpeg processing\n")
     print("="*60)
     
     # Process the selected song
@@ -488,7 +852,7 @@ def main():
                 break
     
     if not audio_path or not os.path.exists(audio_path):
-        print(f"⚠️  Audio file not found for: {selected_song}")
+        print(f"Audio file not found for: {selected_song}")
         print(f"   Searched in: {audio_folder_abs}")
         print(f"   Available files: {', '.join(audio_files)}\n")
         return
@@ -498,7 +862,7 @@ def main():
     video_filename = sanitize_filename(video_filename)  # Clean the filename
     output_path = os.path.join(output_folder_abs, video_filename)
     
-    print(f"\n🎵 Processing: {selected_song}")
+    print(f"\nProcessing: {selected_song}")
     print(f"   Audio file: {os.path.basename(audio_path)}")
     print(f"   Output file: {video_filename}")
     print(f"   BPM: {data.get('bpm', 0):.1f}")
@@ -506,17 +870,32 @@ def main():
     
     cut_points = data.get('cut_points', [])
     
-    if not cut_points:
-        print("   ⚠️  No cut points found, skipping...\n")
+    # Load precomputed segments from POST /export (segments.json) first; export path does not need cut_points
+    segments_path = os.path.join(os.path.dirname(output_folder_abs), "segments.json")
+    precomputed_segments = None
+    if os.path.exists(segments_path):
+        try:
+            with open(segments_path, 'r') as f:
+                precomputed_segments = json.load(f)
+            if precomputed_segments:
+                print(f"   Using {len(precomputed_segments)} precomputed segments from segments.json")
+        except Exception as e:
+            print(f"   Could not load segments.json: {e}")
+    
+    if not cut_points and not precomputed_segments:
+        print("   No cut points and no precomputed segments, skipping...\n")
         return
     
     try:
         create_video_ultrafast(
-            audio_path, 
-            cut_points, 
-            clip_manager, 
+            audio_path,
+            cut_points,
+            clip_manager,
             output_path,
-            max_duration=MAX_DURATION
+            max_duration=MAX_DURATION,
+            precomputed_segments=precomputed_segments,
+            min_clip_duration=min_clip_duration,
+            max_clip_duration=max_clip_duration,
         )
         
         # Reset clip usage
@@ -524,12 +903,12 @@ def main():
         clip_manager.last_used_clip = None
         
     except Exception as e:
-        print(f"❌ Error creating video: {e}\n")
+        print(f"Error creating video: {e}\n")
         import traceback
         traceback.print_exc()
     
     print("="*60)
-    print(f"✅ Video created in '{OUTPUT_FOLDER}'!")
+    print(f"Video created in '{OUTPUT_FOLDER}'!")
     print(f"   Final filename: {video_filename}")
     print("="*60 + "\n")
 

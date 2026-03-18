@@ -14,7 +14,8 @@
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
         }
-      }
+      },
+      "bundleIdentifier": "com.anonymous.clipgsm"
     },
     "android": {
       "adaptiveIcon": {
