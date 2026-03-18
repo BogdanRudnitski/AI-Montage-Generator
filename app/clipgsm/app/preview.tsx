@@ -160,6 +160,8 @@ export default function PreviewScreen() {
   const finishedSegmentsRef = useRef<Set<number>>(new Set());
   const advanceInFlightRef = useRef(false);
   const slotSeekTokenRef = useRef<number[]>([0, 0, 0]);
+  const lastCrossSegmentScrubAtRef = useRef(0);
+  const lastRequestedSeekSecRef = useRef<number[]>([NaN, NaN, NaN]);
   // Thumbnail cache by unified key (uri::time::w::h::q). In-flight deduplication for concurrent identical requests.
   const thumbnailCacheRef = useRef<Map<string, string>>(new Map());
   const thumbnailInflightRef = useRef<Map<string, Promise<string>>>(new Map());
@@ -785,6 +787,59 @@ export default function PreviewScreen() {
     return sec;
   };
 
+  const requestScrubSeek = (slot: number, clipPositionSec: number, logTag: string) => {
+    const prev = lastRequestedSeekSecRef.current[slot];
+    if (Number.isFinite(prev) && Math.abs(clipPositionSec - prev) < 0.03) {
+      if (__DEV__) debugLog("scrub:seek-skipped-small-delta", { slot, prev, next: clipPositionSec, tag: logTag });
+      return;
+    }
+    lastRequestedSeekSecRef.current[slot] = clipPositionSec;
+    const ref = getMountedVideoRef(slot);
+    if (!ref) return;
+    const token = ++slotSeekTokenRef.current[slot];
+    if (__DEV__) debugLog(logTag, { slot, clipPositionSec });
+    ref
+      .setPositionAsync(clipPositionSec * 1000, {
+        toleranceMillisBefore: 0,
+        toleranceMillisAfter: 0,
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (token !== slotSeekTokenRef.current[slot]) {
+          if (__DEV__) debugLog("seek-token-stale", { slot, token });
+        }
+      });
+  };
+
+  const scrubJumpToSegment = async (targetIndex: number, clipPositionSec: number) => {
+    const slot = currentVisibleSlotRef.current;
+    const ref = getMountedVideoRef(slot);
+    if (!ref) return;
+
+    const prev = lastRequestedSeekSecRef.current[slot];
+    if (Number.isFinite(prev) && Math.abs(clipPositionSec - prev) < 0.03) {
+      if (__DEV__) debugLog("scrub:seek-skipped-small-delta", { slot, prev, next: clipPositionSec, tag: "scrub:cross-segment-direct-seek" });
+      return;
+    }
+    lastRequestedSeekSecRef.current[slot] = clipPositionSec;
+
+    currentIndexRef.current = targetIndex;
+    setCurrentSegmentIndex(targetIndex);
+
+    const token = ++slotSeekTokenRef.current[slot];
+    try {
+      await ref.setPositionAsync(clipPositionSec * 1000, {
+        toleranceMillisBefore: 0,
+        toleranceMillisAfter: 0,
+      });
+    } catch {}
+    finally {
+      if (token !== slotSeekTokenRef.current[slot]) {
+        if (__DEV__) debugLog("seek-token-stale", { slot, token });
+      }
+    }
+  };
+
   const seekToTime = (time: number, refs: React.RefObject<Video | null>[]) => {
     const info = getSegmentAtTime(time);
     if (!info) return;
@@ -794,9 +849,11 @@ export default function PreviewScreen() {
     const currentIndex = currentIndexRef.current;
     if (targetIndex !== currentIndex) {
       soundRef.current?.setPositionAsync(time * 1000).catch(() => {});
-      if (!isScrubbingRef.current) {
-        advanceTo(targetIndex, { force: true, seekToClipPosition: info.clipPosition });
+      if (isScrubbingRef.current || isResizingRef.current) {
+        if (__DEV__) debugLog("scrub:advance-blocked-during-interaction", { where: "seekToTime", to: targetIndex });
+        return;
       }
+      advanceTo(targetIndex, { force: true, seekToClipPosition: info.clipPosition });
     } else {
       setCurrentSegmentIndex(targetIndex);
       soundRef.current?.setPositionAsync(time * 1000).catch(() => {});
@@ -914,29 +971,7 @@ export default function PreviewScreen() {
         lastScrubSeekTimeRef.current = quantizedTime;
         const sec = seekSecForScrub(item, info.clipPosition);
         const slot = currentVisibleSlotRef.current;
-        if (__DEV__) {
-          debugLog("scrub:immediate-seek", {
-            segmentIndex: targetIndex,
-            clipPosition: info.clipPosition,
-            visibleSlotIndex: slot,
-          });
-        }
-        const ref = getMountedVideoRef(slot);
-        if (!ref) {
-          if (__DEV__) debugLog("slot-ref-null", { slot, action: "scrub-same-segment" });
-          if (isScrubbingRef.current) scrubRafRef.current = requestAnimationFrame(applyScrubFrame);
-          return;
-        }
-        const token = ++slotSeekTokenRef.current[slot];
-        ref
-          .setPositionAsync(sec * 1000, {
-            toleranceMillisBefore: 0,
-            toleranceMillisAfter: 0,
-          })
-          .catch(() => {})
-          .finally(() => {
-            if (token !== slotSeekTokenRef.current[slot] && __DEV__) debugLog("seek-token-stale", { slot, token });
-          });
+        requestScrubSeek(slot, sec, "scrub:same-segment-seek");
       } else if (typeof __DEV__ !== "undefined" && __DEV__) {
         debugLog("scrub:immediate-seek-skip", {
           reason: "throttled",
@@ -955,30 +990,25 @@ export default function PreviewScreen() {
       if (!resizing) {
         soundRef.current?.setPositionAsync(quantizedTime * 1000).catch(() => {});
       }
-      if (isScrubbingRef.current) {
-        // Direct scrub path: do NOT use advanceTo(). Update segment state/refs; then seek the visible
-        // slot on next frame (after React commits the new source) so we don't trigger playback transitions.
-        currentIndexRef.current = targetIndex;
-        segmentBoundsRef.current = { startTime: item.startTime, endTime: item.endTime };
-        segmentStartTimeRef.current = Date.now() / 1000;
-        setCurrentSegmentIndex(targetIndex);
-        const seekSec = seekSecForScrub(item, info.clipPosition);
-        const slot = currentVisibleSlotRef.current;
-        requestAnimationFrame(() => {
-          const ref = getMountedVideoRef(slot);
-          if (ref) {
-            ref.setPositionAsync(seekSec * 1000, {
-              toleranceMillisBefore: 0,
-              toleranceMillisAfter: 0,
-            }).catch(() => {});
-          }
-        });
-        if (__DEV__) debugLog("scrub:direct-jump", { to: targetIndex, clipPosition: info.clipPosition });
+      if (isScrubbingRef.current || isResizingRef.current) {
+        const now = Date.now();
+        if (now - lastCrossSegmentScrubAtRef.current < 16) {
+          if (__DEV__) debugLog("scrub:immediate-seek-skip", { reason: "cross-segment-throttled", segmentIndex: targetIndex });
+        } else {
+          lastCrossSegmentScrubAtRef.current = now;
+          const seekSec = seekSecForScrub(item, info.clipPosition);
+          if (__DEV__) debugLog("scrub:cross-segment-direct-seek", { from: currentIndex, to: targetIndex, clipPositionSec: seekSec });
+          // Do not call advanceTo() during scrub/resize interaction.
+          // Keep currentIndexRef + state synchronized.
+          void scrubJumpToSegment(targetIndex, seekSec);
+        }
       } else {
-        advanceTo(targetIndex, { force: true, seekToClipPosition: info.clipPosition });
+        if (!isScrubbingRef.current && !isResizingRef.current) {
+          advanceTo(targetIndex, { force: true, seekToClipPosition: info.clipPosition });
+        }
       }
     }
-    if (isScrubbingRef.current) {
+    if (isScrubbingRef.current || isResizingRef.current) {
       scrubRafRef.current = requestAnimationFrame(applyScrubFrame);
     }
   };
@@ -1268,6 +1298,7 @@ export default function PreviewScreen() {
   const onPlaybackStatusUpdate =
     (slot: number) => (status: AVPlaybackStatus) => {
       try {
+        if (isScrubbingRef.current || isResizingRef.current) return;
         const list = playListRef.current;
         if (!status.isLoaded || list.length === 0) return;
         const durationMillis = status.durationMillis ?? 0;
@@ -1313,7 +1344,11 @@ export default function PreviewScreen() {
             setIsPlaying(false);
             return;
           }
-          if (!isScrubbingRef.current) advanceTo(idx + 1);
+          if (isScrubbingRef.current || isResizingRef.current) {
+            if (__DEV__) debugLog("scrub:advance-blocked-during-interaction", { where: "statusUpdate:segmentDone", idx });
+          } else {
+            advanceTo(idx + 1);
+          }
           return;
         }
 
@@ -1409,8 +1444,12 @@ export default function PreviewScreen() {
         const t = Math.min(seg.startTime + elapsed, seg.endTime);
         timelineTimeRef.current = t;
         setPlayheadTime(t);
-        if (t >= seg.endTime - EPSILON && !isScrubbingRef.current) {
-          advanceTo(idx + 1);
+        if (t >= seg.endTime - EPSILON) {
+          if (isScrubbingRef.current || isResizingRef.current) {
+            if (__DEV__) debugLog("scrub:advance-blocked-during-interaction", { where: "tick:autoAdvance", idx });
+          } else {
+            advanceTo(idx + 1);
+          }
         }
         if (__DEV__ && Date.now() - playheadLogThrottleRef.current > 1000) {
           playheadLogThrottleRef.current = Date.now();
@@ -1432,9 +1471,13 @@ export default function PreviewScreen() {
 
   // When current segment has no clip, advance after segment duration (timeline/RAF is single source)
   useEffect(() => {
-    if (!seg || seg.uri || isScrubbing || playList.length === 0 || !isPlaying) return;
+    if (!seg || seg.uri || isScrubbing || isResizingRef.current || playList.length === 0 || !isPlaying) return;
     const duration = seg.segmentDuration;
     const timeoutId = setTimeout(() => {
+      if (isScrubbingRef.current || isResizingRef.current) {
+        if (__DEV__) debugLog("scrub:advance-blocked-during-interaction", { where: "timeout:noClipAdvance", idx: currentSegmentIndex });
+        return;
+      }
       advanceTo(currentSegmentIndex + 1);
     }, duration * 1000);
     return () => clearTimeout(timeoutId);
@@ -1654,7 +1697,9 @@ export default function PreviewScreen() {
                 timelineTimeRef.current = t;
                 setPlayheadTime(t);
                 soundRef.current?.setPositionAsync(t * 1000).catch(() => {});
-                if (!isScrubbingRef.current) {
+                if (isScrubbingRef.current || isResizingRef.current) {
+                  if (__DEV__) debugLog("scrub:advance-blocked-during-interaction", { where: "onSelectSegment", to: info.segmentIndex });
+                } else {
                   advanceTo(info.segmentIndex, { force: true, seekToClipPosition: info.clipPosition });
                 }
               } else {
