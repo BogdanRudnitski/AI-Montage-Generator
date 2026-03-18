@@ -34,13 +34,10 @@ export default function ResultScreen() {
         setIsDownloading(true);
         const timestamp = Date.now();
         const fileUri = `${FileSystem.documentDirectory}${timestamp}_${videoName}`;
-        
-        console.log("Pre-downloading video to:", fileUri);
         const downloadResult = await FileSystem.downloadAsync(fullVideoUrl, fileUri);
         
         if (downloadResult.uri) {
           setDownloadedFileUri(downloadResult.uri);
-          console.log("✓ Video pre-downloaded successfully");
         }
       } catch (error) {
         console.error("Pre-download failed:", error);
@@ -70,13 +67,10 @@ export default function ResultScreen() {
       let fileUri = downloadedFileUri;
       
       if (!fileUri) {
-        console.log("No pre-downloaded file, downloading now...");
         const timestamp = Date.now();
         fileUri = `${FileSystem.documentDirectory}${timestamp}_${videoName}`;
         const downloadResult = await FileSystem.downloadAsync(fullVideoUrl, fileUri);
         fileUri = downloadResult.uri;
-      } else {
-        console.log("Using pre-downloaded file:", fileUri);
       }
 
       if (!fileUri) {
@@ -97,10 +91,11 @@ export default function ResultScreen() {
         }
       }
 
-      Alert.alert("✅ Saved!", "Video saved to your gallery.");
+      Alert.alert("Saved", "Video saved to your gallery.");
     } catch (err) {
       console.error("Save error:", err);
-      Alert.alert("Save Failed", `Could not save video: ${err.message || 'Unknown error'}`);
+      const message = err instanceof Error ? err.message : String(err);
+      Alert.alert("Save Failed", `Could not save video: ${message || "Unknown error"}`);
     } finally {
       setSaving(false);
     }
@@ -114,13 +109,10 @@ export default function ResultScreen() {
       let fileUri = downloadedFileUri;
       
       if (!fileUri) {
-        console.log("No pre-downloaded file, downloading now...");
         const timestamp = Date.now();
         fileUri = `${FileSystem.documentDirectory}${timestamp}_${videoName}`;
         const downloadResult = await FileSystem.downloadAsync(fullVideoUrl, fileUri);
         fileUri = downloadResult.uri;
-      } else {
-        console.log("Using pre-downloaded file:", fileUri);
       }
 
       if (!fileUri) {
@@ -142,7 +134,8 @@ export default function ResultScreen() {
       });
     } catch (err) {
       console.error("Share error:", err);
-      Alert.alert("Share Failed", `Could not share video: ${err.message || 'Unknown error'}`);
+      const message = err instanceof Error ? err.message : String(err);
+      Alert.alert("Share Failed", `Could not share video: ${message || "Unknown error"}`);
     } finally {
       setSharing(false);
     }
@@ -186,7 +179,7 @@ export default function ResultScreen() {
           activeOpacity={0.85}
         >
           <Ionicons name="download-outline" size={24} color="#fff" />
-          <Text style={styles.bottomButtonText}>{saving ? "Saving…" : "Save"}</Text>
+          <Text style={styles.bottomButtonText}>{saving ? "Saving" : "Save"}</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.bottomButton, styles.shareButton]}
@@ -195,7 +188,7 @@ export default function ResultScreen() {
           activeOpacity={0.85}
         >
           <Ionicons name="share-outline" size={24} color="#fff" />
-          <Text style={styles.bottomButtonText}>{sharing ? "Preparing…" : "Share"}</Text>
+          <Text style={styles.bottomButtonText}>{sharing ? "Preparing" : "Share"}</Text>
         </TouchableOpacity>
       </View>
     </View>

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Video, ResizeMode } from "expo-av";
-import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, StyleSheet, Dimensions, Switch, Modal, FlatList, TextInput, KeyboardAvoidingView, Platform, Animated } from "react-native";
+import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, StyleSheet, Dimensions, Switch, Modal, FlatList, TextInput, KeyboardAvoidingView, Platform } from "react-native";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import Slider from '@react-native-community/slider';
@@ -12,6 +12,8 @@ import { getSavedTracks, addTrackToLibrary, removeTrackFromLibrary, type SavedTr
 
 const { width } = Dimensions.get("window");
 const ART_SQUARE_SIZE = 120;
+// Keep demo buttons in the codebase, but ship them inaccessible by default.
+const DEMO_ENABLED = false;
 
 /** Base64 encode byte array (chunked for large embedded art). */
 function bytesToBase64(bytes: number[]): string {
@@ -66,7 +68,6 @@ export default function ExploreScreen() {
   const [songUploading, setSongUploading] = useState(false);
   const [songUploaded, setSongUploaded] = useState(false);
   const [generateLoading, setGenerateLoading] = useState(false);
-  const progressAnim = useRef(new Animated.Value(0)).current;
   const [duration, setDuration] = useState<number>(30);
   const [syncToGrid, setSyncToGrid] = useState(false);
   
@@ -93,37 +94,17 @@ export default function ExploreScreen() {
                       song !== null && 
                       songUploaded;
 
-  // Indeterminate progress bar animation while analyzing
-  const progressRunning = useRef(false);
+  const uiLocked = generateLoading;
+
+  // When analysis starts, lock editing so the request + resulting preview
+  // can't drift due to mid-request UI changes.
   useEffect(() => {
-    if (!generateLoading) {
-      progressRunning.current = false;
-      progressAnim.setValue(0);
-      return;
-    }
-    progressRunning.current = true;
-    const run = () => {
-      if (!progressRunning.current) return;
-      Animated.sequence([
-        Animated.timing(progressAnim, {
-          toValue: 0.7,
-          duration: 1200,
-          useNativeDriver: false,
-        }),
-        Animated.timing(progressAnim, {
-          toValue: 0,
-          duration: 300,
-          useNativeDriver: false,
-        }),
-      ]).start(({ finished }) => {
-        if (finished && progressRunning.current) run();
-      });
-    };
-    run();
-    return () => {
-      progressRunning.current = false;
-    };
-  }, [generateLoading]);
+    if (!uiLocked) return;
+    setShowMusicModal(false);
+    setNameTrackModal(null);
+    setMusicPickerOpening(false);
+    setSavingTrack(false);
+  }, [uiLocked]);
 
   // Session upload: always re-upload selected videos (deduplicate=false). Backend returns stable_id.mp4.
   async function uploadSingleFile(file: MediaItem, index: number): Promise<{ success: boolean; serverFilename?: string }> {
@@ -177,6 +158,7 @@ export default function ExploreScreen() {
   }
 
   async function pickMedia() {
+    if (uiLocked) return;
     const { granted } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!granted) {
       Alert.alert("Permission Required", "We need access to your gallery to select media.");
@@ -184,7 +166,7 @@ export default function ExploreScreen() {
     }
 
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.All,
+      mediaTypes: ImagePicker.MediaTypeOptions.Videos,
       allowsMultipleSelection: true,
       selectionLimit: 0,
       quality: 1,
@@ -193,8 +175,8 @@ export default function ExploreScreen() {
     if (!result.canceled) {
       const newFiles = result.assets.map((asset, index) => ({
         uri: asset.uri,
-        filename: asset.fileName || `file_${index}.${asset.type === "video" ? "mp4" : "jpg"}`,
-        type: asset.type as "image" | "video",
+        filename: asset.fileName || `video_${index}.mp4`,
+        type: "video" as const,
         uploading: false,
         uploaded: false,
       }));
@@ -220,6 +202,7 @@ export default function ExploreScreen() {
   }
 
   async function uploadSongFile() {
+    if (uiLocked) return;
     if (!song) return;
 
     const formData = new FormData();
@@ -234,7 +217,7 @@ export default function ExploreScreen() {
     formData.append("focus_bass", focusBass.toString());
     formData.append("focus_vocals", focusVocals.toString());
     formData.append("focus_repetitions", focusRepetitions.toString());
-    formData.append("sync_to_grid", syncToGrid.toString()); // ← ADD THIS LINE
+    formData.append("sync_to_grid", syncToGrid.toString());
 
     try {
       setSongUploading(true);
@@ -258,6 +241,7 @@ export default function ExploreScreen() {
   }
 
   async function pickSong() {
+    if (uiLocked) return;
     try {
       const result = await DocumentPicker.getDocumentAsync({ 
         type: "audio/*", 
@@ -279,6 +263,7 @@ export default function ExploreScreen() {
   }
 
   async function pickSongAndAddToLibrary() {
+    if (uiLocked) return;
     if (musicPickerOpening) return;
     setMusicPickerOpening(true);
     setShowMusicModal(false);
@@ -307,6 +292,7 @@ export default function ExploreScreen() {
   }
 
   async function saveNamedTrackToLibrary() {
+    if (uiLocked) return;
     const pending = nameTrackModal;
     if (!pending || savingTrack) return;
     const name = nameTrackValue.trim() || pending.defaultName;
@@ -362,10 +348,11 @@ export default function ExploreScreen() {
 
   // Auto-upload song when settings change
   useEffect(() => {
+    if (uiLocked) return;
     if (song && !songUploading && !songUploaded) {
       uploadSongFile();
     }
-  }, [song, duration, density, aggressiveness, focusBass, focusVocals, focusRepetitions, syncToGrid]);
+  }, [uiLocked, song, duration, density, aggressiveness, focusBass, focusVocals, focusRepetitions, syncToGrid]);
 
   useEffect(() => {
     if (showMusicModal) loadMusicLibrary();
@@ -373,7 +360,7 @@ export default function ExploreScreen() {
 
   // Invalidate previous analysis when the user selects a different song (avoid showing Enya cuts for Kesha)
   useEffect(() => {
-    console.log("[TRACE] song changed → clearing analyzeResult", { songUri: song?.uri, songName: song?.name });
+    // song changed
     setAnalyzeResult(null);
   }, [song?.uri]);
 
@@ -429,6 +416,7 @@ export default function ExploreScreen() {
 
   /** Decoy preview: fixed cut lengths 1, 2, 3, 4, 3, 2, 1 seconds. No backend. Use to verify segment cutting. */
   function openDecoyPreview() {
+    if (uiLocked) return;
     const videoItems = mediaList.filter((m) => m.type === "video");
     if (videoItems.length === 0) {
       Alert.alert("Need at least one video", "Add video clips to test the preview.");
@@ -468,6 +456,7 @@ export default function ExploreScreen() {
   }
 
   function removeMedia(index: number) {
+    if (uiLocked) return;
     const newMediaList = mediaList.filter((_, i) => i !== index);
     setMediaList(newMediaList);
   }
@@ -498,7 +487,7 @@ export default function ExploreScreen() {
               )}
               {!item.uploading && !item.uploaded && (
                 <View style={styles.queuedIndicator}>
-                  <Text style={styles.queuedText}>⏳</Text>
+                  <Text style={styles.queuedText}>Queued</Text>
                 </View>
               )}
             </View>
@@ -512,13 +501,14 @@ export default function ExploreScreen() {
         </View>
         <View style={styles.mediaTypeTag}>
           <Text style={styles.mediaTypeText}>
-            {item.type === "video" ? "VIDEO" : "PHOTO"}
+            VIDEO
           </Text>
         </View>
         <TouchableOpacity 
           style={styles.deleteButton}
           onPress={() => removeMedia(index)}
           activeOpacity={0.7}
+          disabled={uiLocked}
         >
           <Text style={styles.deleteButtonText}>×</Text>
         </TouchableOpacity>
@@ -527,10 +517,10 @@ export default function ExploreScreen() {
   }
 
   const densityLabels = {
-    low: { label: 'Low', desc: '~30 cuts', emoji: '🐌' },
-    medium: { label: 'Medium', desc: '~60 cuts', emoji: '🚶' },
-    high: { label: 'High', desc: '~90 cuts', emoji: '🏃' },
-    insane: { label: 'Insane', desc: '~150 cuts', emoji: '🚀' }
+    low: { label: "Low", desc: "~30 cuts" },
+    medium: { label: "Medium", desc: "~60 cuts" },
+    high: { label: "High", desc: "~90 cuts" },
+    insane: { label: "Insane", desc: "~150 cuts" },
   };
 
   return (
@@ -552,11 +542,11 @@ export default function ExploreScreen() {
           <View style={styles.sectionHeader}>
             <View style={styles.sectionTitleRow}>
               <View style={styles.sectionIconBg}>
-                <Text style={styles.sectionIcon}>📸</Text>
+                <Ionicons name="camera" size={22} color="#6366f1" />
               </View>
               <View>
                 <Text style={styles.sectionTitle}>Media Gallery</Text>
-                <Text style={styles.sectionSubtitle}>Photos & Videos</Text>
+                <Text style={styles.sectionSubtitle}>Videos</Text>
               </View>
             </View>
             <View style={styles.countBadge}>
@@ -569,14 +559,15 @@ export default function ExploreScreen() {
               style={styles.emptyCard} 
               onPress={pickMedia}
               activeOpacity={0.7}
+              disabled={uiLocked}
             >
               <View style={styles.emptyIconContainer}>
-                <Text style={styles.emptyIcon}>🎬</Text>
+                <Ionicons name="add-circle-outline" size={28} color="#6366f1" />
               </View>
               <Text style={styles.emptyTitle}>Add Your Media</Text>
-              <Text style={styles.emptySubtitle}>Tap to select photos and videos</Text>
+              <Text style={styles.emptySubtitle}>Tap to select videos</Text>
               <View style={styles.emptyHint}>
-                <Text style={styles.emptyHintText}>Uploads in parallel</Text>
+                <Text style={styles.emptyHintText}>Uploads</Text>
               </View>
             </TouchableOpacity>
           ) : (
@@ -590,6 +581,7 @@ export default function ExploreScreen() {
                 style={styles.addMoreCard}
                 onPress={pickMedia}
                 activeOpacity={0.7}
+                disabled={uiLocked}
               >
                 <Text style={styles.addMoreIcon}>+</Text>
                 <Text style={styles.addMoreText}>Add more</Text>
@@ -603,7 +595,7 @@ export default function ExploreScreen() {
           <View style={styles.sectionHeader}>
             <View style={styles.sectionTitleRow}>
               <View style={styles.sectionIconBg}>
-                <Text style={styles.sectionIcon}>🎵</Text>
+                <Ionicons name="musical-notes" size={22} color="#6366f1" />
               </View>
               <View>
                 <Text style={styles.sectionTitle}>Soundtrack</Text>
@@ -617,9 +609,10 @@ export default function ExploreScreen() {
               style={styles.audioCard}
               onPress={() => setShowMusicModal(true)}
               activeOpacity={0.7}
+              disabled={uiLocked}
             >
               <View style={styles.audioIconContainer}>
-                <Text style={styles.audioIcon}>🎵</Text>
+                <Ionicons name="musical-notes" size={22} color="#fff" />
               </View>
               <View style={styles.audioTextContainer}>
                 <Text style={styles.audioTitle}>Select Background Music</Text>
@@ -634,13 +627,18 @@ export default function ExploreScreen() {
               styles.audioCardSelected,
               songUploading && styles.audioCardUploading
             ]}>
-              <View style={styles.audioIconContainerSelected}>
+              <View
+                style={[
+                  styles.audioIconContainerSelected,
+                  songUploaded && styles.audioIconContainerSelectedUploaded,
+                ]}
+              >
                 {songUploading ? (
                   <ActivityIndicator color="#fff" size="small" />
                 ) : songUploaded ? (
-                  <Text style={styles.audioIcon}>✓</Text>
+                  <Ionicons name="checkmark-circle" size={28} color="#fff" />
                 ) : (
-                  <Text style={styles.audioIcon}>🎵</Text>
+                  <Ionicons name="musical-notes" size={18} color="#fff" />
                 )}
               </View>
               <View style={styles.audioTextContainer}>
@@ -649,7 +647,11 @@ export default function ExploreScreen() {
                   {songUploading ? "Uploading..." : songUploaded ? "Ready to create" : "Waiting..."}
                 </Text>
               </View>
-              <TouchableOpacity onPress={() => setShowMusicModal(true)} style={styles.changeButton}>
+              <TouchableOpacity
+                onPress={() => setShowMusicModal(true)}
+                style={styles.changeButton}
+                disabled={uiLocked}
+              >
                 <Text style={styles.changeButtonText}>Change</Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -658,6 +660,7 @@ export default function ExploreScreen() {
                   setSongUploaded(false);
                 }}
                 style={styles.deleteSongButton}
+                disabled={uiLocked}
               >
                 <Text style={styles.deleteSongText}>×</Text>
               </TouchableOpacity>
@@ -668,7 +671,11 @@ export default function ExploreScreen() {
             <TouchableOpacity
               style={styles.musicModalBackdrop}
               activeOpacity={1}
-              onPress={() => setShowMusicModal(false)}
+              onPress={() => {
+                if (uiLocked) return;
+                setShowMusicModal(false);
+              }}
+              disabled={uiLocked}
             >
               <View style={styles.musicModalContent} onStartShouldSetResponder={() => true}>
                 <Text style={styles.musicModalTitle}>Select music</Text>
@@ -682,16 +689,18 @@ export default function ExploreScreen() {
                       <TouchableOpacity
                         style={styles.musicModalRowTouch}
                         onPress={() => {
+                          if (uiLocked) return;
                           setSong({ uri: item.uri, name: item.name });
                           setSongUploaded(false);
                           setShowMusicModal(false);
                         }}
+                        disabled={uiLocked}
                       >
                         {item.artUri ? (
                           <Image source={{ uri: item.artUri }} style={styles.musicModalRowArt} />
                         ) : (
                           <View style={styles.musicModalRowArtPlaceholder}>
-                            <Text style={styles.musicModalRowIcon}>🎵</Text>
+                            <Ionicons name="musical-notes" size={22} color="#6366f1" />
                           </View>
                         )}
                         <View style={styles.musicModalRowTextWrap}>
@@ -702,6 +711,7 @@ export default function ExploreScreen() {
                       <TouchableOpacity
                         style={styles.musicModalDeleteBtn}
                         onPress={async () => {
+                          if (uiLocked) return;
                           await removeTrackFromLibrary(item.id);
                           setSavedTracks((prev) => prev.filter((t) => t.id !== item.id));
                           if (song?.uri === item.uri) {
@@ -709,6 +719,7 @@ export default function ExploreScreen() {
                             setSongUploaded(false);
                           }
                         }}
+                        disabled={uiLocked}
                       >
                         <Ionicons name="trash-outline" size={22} color="#94a3b8" />
                       </TouchableOpacity>
@@ -721,16 +732,23 @@ export default function ExploreScreen() {
                 <TouchableOpacity
                   style={[styles.musicModalUploadBtn, musicPickerOpening && styles.musicModalUploadBtnDisabled]}
                   onPress={pickSongAndAddToLibrary}
-                  disabled={musicPickerOpening}
+                  disabled={musicPickerOpening || uiLocked}
                 >
                   {musicPickerOpening ? (
                     <ActivityIndicator size="small" color="#6366f1" />
                   ) : (
                     <Ionicons name="add-circle-outline" size={24} color="#6366f1" />
                   )}
-                  <Text style={styles.musicModalUploadBtnText}>{musicPickerOpening ? "Opening…" : "Upload new"}</Text>
+                  <Text style={styles.musicModalUploadBtnText}>{musicPickerOpening ? "Opening" : "Upload new"}</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.musicModalCancel} onPress={() => setShowMusicModal(false)}>
+                <TouchableOpacity
+                  style={styles.musicModalCancel}
+                  onPress={() => {
+                    if (uiLocked) return;
+                    setShowMusicModal(false);
+                  }}
+                  disabled={uiLocked}
+                >
                   <Text style={styles.musicModalCancelText}>Cancel</Text>
                 </TouchableOpacity>
               </View>
@@ -813,7 +831,7 @@ export default function ExploreScreen() {
           <View style={styles.sectionHeader}>
             <View style={styles.sectionTitleRow}>
               <View style={styles.sectionIconBg}>
-                <Text style={styles.sectionIcon}>⏱️</Text>
+                <Ionicons name="time-outline" size={22} color="#6366f1" />
               </View>
               <View>
                 <Text style={styles.sectionTitle}>Video Length</Text>
@@ -830,7 +848,9 @@ export default function ExploreScreen() {
                   styles.durationButton,
                   duration === sec && styles.durationButtonActive
                 ]}
+                disabled={uiLocked}
                 onPress={() => {
+                  if (uiLocked) return;
                   setDuration(sec);
                   setSongUploaded(false);
                 }}
@@ -851,7 +871,11 @@ export default function ExploreScreen() {
         <View style={styles.section}>
           <TouchableOpacity
             style={styles.advancedToggle}
-            onPress={() => setShowAdvanced(!showAdvanced)}
+            disabled={uiLocked}
+            onPress={() => {
+              if (uiLocked) return;
+              setShowAdvanced(!showAdvanced);
+            }}
             activeOpacity={0.7}
           >
             <View style={styles.advancedToggleLeft}>
@@ -872,16 +896,16 @@ export default function ExploreScreen() {
           {showAdvanced && (
             <View style={styles.advancedContent}>
               <Text style={styles.advancedDescription}>
-                Fine-tune how the AI analyzes your music and generates cuts
+                Fine-tune how analysis works and generates cuts
               </Text>
 
               {/* Density Selector */}
               <View style={styles.densitySection}>
                 <View style={styles.densityHeader}>
-                  <Text style={styles.densityTitle}>✂️ Cut Density</Text>
+                  <Text style={styles.densityTitle}>Cut Density</Text>
                   <View style={styles.densityBadge}>
                     <Text style={styles.densityBadgeText}>
-                      {densityLabels[density].emoji} {densityLabels[density].label}
+                      {densityLabels[density].label}
                     </Text>
                   </View>
                 </View>
@@ -897,18 +921,14 @@ export default function ExploreScreen() {
                         styles.densityOption,
                         density === key && styles.densityOptionActive
                       ]}
+                      disabled={uiLocked}
                       onPress={() => {
+                        if (uiLocked) return;
                         setDensity(key);
                         setSongUploaded(false);
                       }}
                       activeOpacity={0.7}
                     >
-                      <Text style={[
-                        styles.densityEmoji,
-                        density === key && styles.densityEmojiActive
-                      ]}>
-                        {densityLabels[key].emoji}
-                      </Text>
                       <Text style={[
                         styles.densityLabel,
                         density === key && styles.densityLabelActive
@@ -923,7 +943,7 @@ export default function ExploreScreen() {
               {/* Aggressiveness Slider */}
               <View style={styles.sliderSection}>
                 <View style={styles.sliderHeader}>
-                  <Text style={styles.sliderTitle}>⚡ Aggressiveness</Text>
+                  <Text style={styles.sliderTitle}>Aggressiveness</Text>
                   <View style={styles.sliderValueBadge}>
                     <Text style={styles.sliderValueText}>
                       {Math.round(aggressiveness * 100)}%
@@ -935,14 +955,15 @@ export default function ExploreScreen() {
                 </Text>
                 
                 <View style={styles.sliderContainer}>
-                  <Text style={styles.sliderMinLabel}>🐢 Chill</Text>
                   <Slider
                     style={styles.slider}
                     minimumValue={0}
                     maximumValue={1}
                     step={0.1}
                     value={aggressiveness}
+                    disabled={uiLocked}
                     onValueChange={(value) => {
+                      if (uiLocked) return;
                       setAggressiveness(value);
                       setSongUploaded(false);
                     }}
@@ -950,17 +971,15 @@ export default function ExploreScreen() {
                     maximumTrackTintColor="#e2e8f0"
                     thumbTintColor="#6366f1"
                   />
-                  <Text style={styles.sliderMaxLabel}>🔥 Wild</Text>
                 </View>
               </View>
 
               {/* Focus Toggles */}
               <View style={styles.focusSection}>
-                <Text style={styles.focusTitle}>🎯 Detection Focus</Text>
+                <Text style={styles.focusTitle}>Detection Focus</Text>
                 
                 <View style={styles.optionRow}>
                   <View style={styles.optionLeft}>
-                    <Text style={styles.optionIcon}>🎢</Text>
                     <View>
                       <Text style={styles.optionTitle}>Bass Drops</Text>
                       <Text style={styles.optionDescription}>Heavy bass & drops</Text>
@@ -968,18 +987,19 @@ export default function ExploreScreen() {
                   </View>
                   <Switch
                     value={focusBass}
+                    disabled={uiLocked}
                     onValueChange={(val) => {
+                      if (uiLocked) return;
                       setFocusBass(val);
                       setSongUploaded(false);
                     }}
-                    trackColor={{ false: "#e2e8f0", true: "#93c5fd" }}
-                    thumbColor={focusBass ? "#6366f1" : "#cbd5e1"}
+                    trackColor={{ false: "#e2e8f0", true: "#6366f1" }}
+                    thumbColor={focusBass ? "#fff" : "#cbd5e1"}
                   />
                 </View>
 
                 <View style={styles.optionRow}>
                   <View style={styles.optionLeft}>
-                    <Text style={styles.optionIcon}>🎤</Text>
                     <View>
                       <Text style={styles.optionTitle}>Vocal Hits</Text>
                       <Text style={styles.optionDescription}>Consonants & syllables</Text>
@@ -987,18 +1007,19 @@ export default function ExploreScreen() {
                   </View>
                   <Switch
                     value={focusVocals}
+                    disabled={uiLocked}
                     onValueChange={(val) => {
+                      if (uiLocked) return;
                       setFocusVocals(val);
                       setSongUploaded(false);
                     }}
-                    trackColor={{ false: "#e2e8f0", true: "#93c5fd" }}
-                    thumbColor={focusVocals ? "#6366f1" : "#cbd5e1"}
+                    trackColor={{ false: "#e2e8f0", true: "#6366f1" }}
+                    thumbColor={focusVocals ? "#fff" : "#cbd5e1"}
                   />
                 </View>
 
                 <View style={styles.optionRow}>
                   <View style={styles.optionLeft}>
-                    <Text style={styles.optionIcon}>🔁</Text>
                     <View>
                       <Text style={styles.optionTitle}>Repetitions</Text>
                       <Text style={styles.optionDescription}>Repeated words/sounds</Text>
@@ -1006,19 +1027,20 @@ export default function ExploreScreen() {
                   </View>
                   <Switch
                     value={focusRepetitions}
+                    disabled={uiLocked}
                     onValueChange={(val) => {
+                      if (uiLocked) return;
                       setFocusRepetitions(val);
                       setSongUploaded(false);
                     }}
-                    trackColor={{ false: "#e2e8f0", true: "#93c5fd" }}
-                    thumbColor={focusRepetitions ? "#6366f1" : "#cbd5e1"}
+                    trackColor={{ false: "#e2e8f0", true: "#6366f1" }}
+                    thumbColor={focusRepetitions ? "#fff" : "#cbd5e1"}
                   />
                 </View>
               </View>
 
               <View style={styles.optionRow}>
                 <View style={styles.optionLeft}>
-                  <Text style={styles.optionIcon}>🎯</Text>
                   <View>
                     <Text style={styles.optionTitle}>Sync to Beat Grid</Text>
                     <Text style={styles.optionDescription}>Snap cuts to nearest beat</Text>
@@ -1026,12 +1048,14 @@ export default function ExploreScreen() {
                 </View>
                 <Switch
                   value={syncToGrid}
+                  disabled={uiLocked}
                   onValueChange={(val) => {
+                    if (uiLocked) return;
                     setSyncToGrid(val);
                     setSongUploaded(false);
                   }}
-                  trackColor={{ false: "#e2e8f0", true: "#93c5fd" }}
-                  thumbColor={syncToGrid ? "#6366f1" : "#cbd5e1"}
+                  trackColor={{ false: "#e2e8f0", true: "#6366f1" }}
+                  thumbColor={syncToGrid ? "#fff" : "#cbd5e1"}
                 />
               </View>
 
@@ -1041,6 +1065,33 @@ export default function ExploreScreen() {
                   Tip: Start with Medium density and 70% aggressiveness, then adjust to taste
                 </Text>
               </View>
+              {DEMO_ENABLED && (
+              <View style={styles.hiddenDemoRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.hiddenDemoButton,
+                    mediaList.filter((m) => m.type === "video").length === 0 && styles.buttonDisabled,
+                  ]}
+                  onPress={openDecoyPreview}
+                  activeOpacity={0.8}
+                    disabled={uiLocked || mediaList.filter((m) => m.type === "video").length === 0}
+                >
+                  <Text style={styles.hiddenDemoButtonText}>Preview test</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[
+                    styles.hiddenDemoButton,
+                    { backgroundColor: "#fff", borderColor: "#6366f1" },
+                  ]}
+                  onPress={() => router.push("/timeline-demo")}
+                  activeOpacity={0.8}
+                  disabled={uiLocked}
+                >
+                  <Text style={styles.hiddenDemoButtonText}>Timeline demo</Text>
+                </TouchableOpacity>
+              </View>
+              )}
             </View>
           )}
         </View>
@@ -1057,54 +1108,17 @@ export default function ExploreScreen() {
             disabled={generateLoading || !allUploaded}
           >
             {generateLoading ? (
-              <View style={styles.generateButtonProgressWrap}>
-                <Text style={styles.buttonText}>Analyzing…</Text>
-                <View style={styles.progressBarTrack}>
-                  <Animated.View
-                    style={[
-                      styles.progressBarFill,
-                      {
-                        width: progressAnim.interpolate({
-                          inputRange: [0, 1],
-                          outputRange: ["0%", "100%"],
-                        }),
-                      },
-                    ]}
-                  />
-                </View>
+              <View style={styles.generateButtonLoadingContent}>
+                <ActivityIndicator size="small" color="#fff" />
+                <Text style={styles.buttonText}>Analyzing...</Text>
               </View>
             ) : (
               <>
-                <Text style={styles.buttonIcon}>✨</Text>
                 <Text style={styles.buttonText}>
                   {allUploaded ? "Analyze & preview" : "Upload files first"}
                 </Text>
               </>
             )}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.decoyButton,
-              mediaList.filter((m) => m.type === "video").length === 0 && styles.buttonDisabled,
-            ]}
-            onPress={openDecoyPreview}
-            activeOpacity={0.8}
-            disabled={mediaList.filter((m) => m.type === "video").length === 0}
-          >
-            <Text style={styles.decoyButtonText}>
-              Test preview (1→2→3→4→3→2→1 s) — no analysis
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.decoyButton, { marginTop: 8, backgroundColor: "#8b5cf6" }]}
-            onPress={() => router.push("/timeline-demo")}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.decoyButtonText}>
-              Try timeline demo — no uploads, test resize & scrub
-            </Text>
           </TouchableOpacity>
         </View>
 
@@ -1445,11 +1459,11 @@ const styles = StyleSheet.create({
     width: 60,
     height: 60,
     borderRadius: 30,
-    backgroundColor: '#fef2f2',
+    backgroundColor: 'rgba(99, 102, 241, 0.16)',
     justifyContent: "center",
     alignItems: "center",
     marginRight: 16,
-    shadowColor: "#ef4444",
+    shadowColor: "#6366f1",
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.2,
     shadowRadius: 8,
@@ -1463,6 +1477,9 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     marginRight: 16,
+  },
+  audioIconContainerSelectedUploaded: {
+    backgroundColor: "rgba(99, 102, 241, 0.18)",
   },
   audioIcon: {
     fontSize: 30,
@@ -1887,29 +1904,20 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.4,
     shadowRadius: 16,
     elevation: 8,
+    overflow: "hidden",
   },
   buttonDisabled: {
     backgroundColor: "#cbd5e1",
+    borderColor: "#cbd5e1",
     shadowColor: "#000",
     shadowOpacity: 0.1,
   },
-  generateButtonProgressWrap: {
-    width: "100%",
+  generateButtonLoadingContent: {
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: 10,
-  },
-  progressBarTrack: {
-    width: "100%",
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "rgba(255,255,255,0.35)",
-    overflow: "hidden",
-  },
-  progressBarFill: {
-    height: "100%",
-    borderRadius: 3,
-    backgroundColor: "#fff",
+    zIndex: 1,
   },
   buttonIcon: {
     fontSize: 24,
@@ -1934,5 +1942,28 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "600",
     color: "#64748b",
+  },
+  hiddenDemoRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    marginTop: 12,
+  },
+  hiddenDemoButton: {
+    flex: 1,
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(99, 102, 241, 0.35)",
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  hiddenDemoButtonText: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#6366f1",
   },
 });

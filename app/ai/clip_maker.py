@@ -41,16 +41,16 @@ def detect_best_encoder() -> str:
     encoders = (result.stdout or "").lower()
 
     if "h264_videotoolbox" in encoders:
-        print("⚡ Using Apple VideoToolbox hardware encoder")
+        print("Using Apple VideoToolbox hardware encoder")
         return "h264_videotoolbox"
     if "h264_nvenc" in encoders:
-        print("⚡ Using NVIDIA NVENC hardware encoder")
+        print("Using NVIDIA NVENC hardware encoder")
         return "h264_nvenc"
     if "h264_qsv" in encoders:
-        print("⚡ Using Intel QuickSync hardware encoder")
+        print("Using Intel QuickSync hardware encoder")
         return "h264_qsv"
 
-    print("⚠️ Falling back to CPU encoder libx264")
+    print("Warning: falling back to CPU encoder libx264")
     return "libx264"
 
 SCRIPT_DIR = Path(__file__).parent
@@ -139,7 +139,7 @@ class ClipManager:
     def load_clips(self):
         """Load all video clips metadata (no actual loading for speed)"""
         if not os.path.exists(self.clips_folder):
-            print(f"❌ '{self.clips_folder}' folder not found!")
+            print(f"Error: '{self.clips_folder}' folder not found!")
             return
 
         video_files = [f for f in os.listdir(self.clips_folder)
@@ -157,9 +157,9 @@ class ClipManager:
                 duration = float(result.stdout.strip())
                 self.clips.append({'path': path, 'filename': video_file, 'duration': duration})
                 self.clip_usage[video_file] = []
-                print(f"   ✅ {video_file} ({duration:.2f}s)")
+                print(f"   {video_file} ({duration:.2f}s)")
             except Exception as e:
-                print(f"   ❌ Failed to scan {video_file}: {e}")
+                print(f"   Failed to scan {video_file}: {e}")
         print(f"\n📊 Loaded {len(self.clips)} clips\n")
 
     def _overlaps_any(self, start: float, end: float, used: list) -> bool:
@@ -362,7 +362,7 @@ def compute_segments_only(cut_points, duration, clip_manager, max_duration=None,
 def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, max_duration=None, precomputed_segments=None,
                           min_clip_duration=DEFAULT_MIN_CLIP_DURATION, max_clip_duration=None):
     """Create video using direct ffmpeg concat. Duration rules from options: min_clip_duration, max_clip_duration (optional)."""
-    print(f"\n🎬 Creating video ULTRA FAST...")
+    print("\nCreating video (ultra fast)...")
     print(f"   Audio: {os.path.basename(audio_path)}")
     print(f"   Cut points: {len(cut_points)}")
     
@@ -391,11 +391,11 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
                 'segment_duration': segment_duration,
                 'clip_duration': in_clip_duration,
             })
-        print(f"⚡ Using {len(segment_specs)} precomputed segments...")
+        print(f"Using {len(segment_specs)} precomputed segments...")
         # Duration = end time of last segment (user's edit), capped by audio length
         duration_from_segments = precomputed_segments[-1]['endTime']
         duration = min(duration_from_segments, full_duration)
-        print(f"   📐 Duration from segments: {duration_from_segments:.2f}s (capped by audio: {duration:.2f}s)")
+        print(f"   Duration from segments: {duration_from_segments:.2f}s (capped by audio: {duration:.2f}s)")
         if duration < full_duration:
             # Trim audio without decoding to memory (fast, single stream)
             temp_audio = "temp_trimmed_audio.m4a"
@@ -417,7 +417,7 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
                 step_name="trim audio",
             )
             audio_path = temp_audio
-            print(f"   ⏱️  Audio trimmed to {duration:.2f}s\n")
+            print(f"   Audio trimmed to {duration:.2f}s\n")
         else:
             print(f"   Duration: {duration:.2f}s\n")
     else:
@@ -444,7 +444,7 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
                     step_name="trim audio",
                 )
                 audio_path = temp_audio
-                print(f"   ⏱️  Generating {duration:.2f}s video (trimmed from {full_duration:.2f}s)\n")
+                print(f"   Generating {duration:.2f}s video (trimmed from {full_duration:.2f}s)\n")
             else:
                 print(f"   Duration: {duration:.2f}s\n")
         else:
@@ -454,7 +454,7 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         timestamps = [{'timestamp': 0, 'type': 'start', 'score': 0}] + cut_points + [{'timestamp': duration, 'type': 'end', 'score': 0}]
         timestamps = _split_long_segments(timestamps, max_clip_duration)
         max_msg = f" (max {max_clip_duration}s per clip)" if max_clip_duration else ""
-        print(f"⚡ Generating {len(timestamps)-1} segments{max_msg}...")
+        print(f"Generating {len(timestamps)-1} segments{max_msg}...")
         for i in range(len(timestamps) - 1):
             start_time = timestamps[i]['timestamp']
             end_time = timestamps[i + 1]['timestamp']
@@ -583,9 +583,9 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         segment_files.append(segment_output)
         
         if (i + 1) % 5 == 0:
-            print(f"   ✅ Created {i+1}/{len(segment_specs)} segments")
+            print(f"   Created {i+1}/{len(segment_specs)} segments")
     
-    print(f"\n🔗 Concatenating {len(segment_files)} segments...")
+    print(f"\nConcatenating {len(segment_files)} segments...")
     
     concat_file = os.path.join(temp_folder, "concat.txt")
     with open(concat_file, 'w') as f:
@@ -639,7 +639,7 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
 
     _run_ffmpeg(final_encode_cmd, step_name="final encode (GPU + portrait)")
 
-    print(f"🎵 Muxing audio track ({duration:.1f}s)...")
+    print(f"Muxing audio track ({duration:.1f}s)...")
     _run_ffmpeg(
         [
             "ffmpeg",
@@ -661,7 +661,7 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         step_name="mux audio",
     )
     
-    print(f"🧹 Cleaning up temporary files...")
+    print("Cleaning up temporary files...")
     
     # Cleanup temp files
     for f in segment_files:
@@ -683,7 +683,7 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
     if os.path.exists("temp_trimmed_audio.m4a"):
         os.remove("temp_trimmed_audio.m4a")
     
-    print(f"✅ Video created successfully!\n")
+    print("Video created successfully!\n")
 
 def main():
     """Main function that automatically processes the song specified in options.json"""
@@ -711,12 +711,12 @@ def main():
                 min_clip_duration = float(options.get('minClipDuration', min_clip_duration))
                 if options.get('maxClipDuration') is not None:
                     max_clip_duration = float(options['maxClipDuration'])
-                print(f"📋 Loaded options from options.json")
+                print("Loaded options from options.json")
                 if target_song:
                     print(f"   Target song: {target_song}")
                 print(f"   minClipDuration: {min_clip_duration}s, maxClipDuration: {max_clip_duration or 'none'}\n")
         except Exception as e:
-            print(f"⚠️  Error reading options.json: {e}\n")
+            print(f"Error reading options.json: {e}\n")
     
     # Export-only path: segments.json was written by POST /export; use it without requiring audio_analysis.json
     precomputed_segments = None
@@ -725,12 +725,12 @@ def main():
             with open(segments_path, 'r') as f:
                 precomputed_segments = json.load(f)
         except Exception as e:
-            print(f"⚠️  Could not load segments.json: {e}")
+            print(f"Could not load segments.json: {e}")
     if precomputed_segments and target_song:
-        print(f"📤 Export-only mode: using {len(precomputed_segments)} segments from segments.json (no analysis required)\n")
+        print(f"Export-only mode: using {len(precomputed_segments)} segments from segments.json (no analysis required)\n")
         clip_manager = ClipManager(clips_folder_abs)
         if not clip_manager.clips:
-            print(f"❌ No video clips found in '{CLIPS_FOLDER}'!\n")
+            print(f"No video clips found in '{CLIPS_FOLDER}'!\n")
             return
         if not os.path.exists(output_folder_abs):
             os.makedirs(output_folder_abs)
@@ -744,13 +744,13 @@ def main():
                 audio_path = os.path.join(audio_folder_abs, f)
                 break
         if not audio_path or not os.path.exists(audio_path):
-            print(f"⚠️  Audio file not found for: {target_song}")
+            print(f"Audio file not found for: {target_song}")
             print(f"   Searched in: {audio_folder_abs}\n")
             return
         video_filename = base_target + '_final.mp4'
         video_filename = sanitize_filename(video_filename)
         output_path = os.path.join(output_folder_abs, video_filename)
-        print(f"🎵 Export: {target_song} -> {video_filename}\n")
+        print(f"Export: {target_song} -> {video_filename}\n")
         try:
             create_video_ultrafast(
                 audio_path, [], clip_manager, output_path,
@@ -760,18 +760,18 @@ def main():
                 max_clip_duration=max_clip_duration,
             )
             print("="*60)
-            print(f"✅ Video created in '{OUTPUT_FOLDER}'!")
+            print(f"Video created in '{OUTPUT_FOLDER}'!")
             print(f"   Final filename: {video_filename}")
             print("="*60 + "\n")
         except Exception as e:
-            print(f"❌ Error creating video: {e}\n")
+            print(f"Error creating video: {e}\n")
             import traceback
             traceback.print_exc()
         return
     
     # Check for analysis file
     if not os.path.exists(analysis_json_path):
-        print(f"❌ {ANALYSIS_JSON} not found!")
+        print(f"{ANALYSIS_JSON} not found!")
         print("   Run analyze.py first to analyze audio.\n")
         return
     
@@ -780,7 +780,7 @@ def main():
         results = json.load(f)
     
     if not results:
-        print("❌ No analysis results found!\n")
+        print("No analysis results found!\n")
         return
     
     # Find the song to process
@@ -790,7 +790,7 @@ def main():
         # Look for exact match or the most recent analysis of this song
         if target_song in results:
             selected_song = target_song
-            print(f"✅ Found analysis for: {target_song}\n")
+            print(f"Found analysis for: {target_song}\n")
         else:
             # Check if there's a match without timestamp suffix
             base_name = target_song.rsplit('.', 1)[0]  # Remove extension
@@ -799,26 +799,26 @@ def main():
             if matches:
                 # Get most recent analysis (last in list)
                 selected_song = matches[-1]
-                print(f"✅ Found recent analysis: {selected_song}")
+                print(f"Found recent analysis: {selected_song}")
                 print(f"   (Requested: {target_song})\n")
             else:
-                print(f"❌ No analysis found for: {target_song}")
+                print(f"No analysis found for: {target_song}")
                 print(f"   Available songs: {', '.join(songs)}\n")
                 return
     else:
         # No target specified, use first song
         selected_song = songs[0]
-        print(f"⚠️  No song specified in options.json")
+        print("No song specified in options.json")
         print(f"   Using first available: {selected_song}\n")
     
-    print(f"🎵 Processing: {selected_song}")
-    print(f"⚙️  Using configured MAX_DURATION = {MAX_DURATION}\n")
+    print(f"Processing: {selected_song}")
+    print(f"Using configured MAX_DURATION = {MAX_DURATION}\n")
     
     # Initialize clip manager with absolute path
     clip_manager = ClipManager(clips_folder_abs)
     
     if not clip_manager.clips:
-        print(f"❌ No video clips found in '{CLIPS_FOLDER}'!")
+        print(f"No video clips found in '{CLIPS_FOLDER}'!")
         print(f"   Add .mp4, .mov, .avi, or other video files to the folder.\n")
         return
     
@@ -826,8 +826,8 @@ def main():
     if not os.path.exists(output_folder_abs):
         os.makedirs(output_folder_abs)
     
-    print("🎥 Creating videos from clips and timestamps")
-    print("⚡ ULTRA FAST MODE: Direct ffmpeg processing\n")
+    print("Creating videos from clips and timestamps")
+    print("ULTRA FAST MODE: Direct ffmpeg processing\n")
     print("="*60)
     
     # Process the selected song
@@ -852,7 +852,7 @@ def main():
                 break
     
     if not audio_path or not os.path.exists(audio_path):
-        print(f"⚠️  Audio file not found for: {selected_song}")
+        print(f"Audio file not found for: {selected_song}")
         print(f"   Searched in: {audio_folder_abs}")
         print(f"   Available files: {', '.join(audio_files)}\n")
         return
@@ -862,7 +862,7 @@ def main():
     video_filename = sanitize_filename(video_filename)  # Clean the filename
     output_path = os.path.join(output_folder_abs, video_filename)
     
-    print(f"\n🎵 Processing: {selected_song}")
+    print(f"\nProcessing: {selected_song}")
     print(f"   Audio file: {os.path.basename(audio_path)}")
     print(f"   Output file: {video_filename}")
     print(f"   BPM: {data.get('bpm', 0):.1f}")
@@ -880,10 +880,10 @@ def main():
             if precomputed_segments:
                 print(f"   Using {len(precomputed_segments)} precomputed segments from segments.json")
         except Exception as e:
-            print(f"   ⚠️  Could not load segments.json: {e}")
+            print(f"   Could not load segments.json: {e}")
     
     if not cut_points and not precomputed_segments:
-        print("   ⚠️  No cut points and no precomputed segments, skipping...\n")
+        print("   No cut points and no precomputed segments, skipping...\n")
         return
     
     try:
@@ -903,12 +903,12 @@ def main():
         clip_manager.last_used_clip = None
         
     except Exception as e:
-        print(f"❌ Error creating video: {e}\n")
+        print(f"Error creating video: {e}\n")
         import traceback
         traceback.print_exc()
     
     print("="*60)
-    print(f"✅ Video created in '{OUTPUT_FOLDER}'!")
+    print(f"Video created in '{OUTPUT_FOLDER}'!")
     print(f"   Final filename: {video_filename}")
     print("="*60 + "\n")
 
