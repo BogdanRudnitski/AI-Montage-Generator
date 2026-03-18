@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Video, ResizeMode } from "expo-av";
-import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, StyleSheet, Dimensions, Switch, Modal, FlatList, TextInput, KeyboardAvoidingView, Platform } from "react-native";
+import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, StyleSheet, Dimensions, Switch, Modal, FlatList, TextInput, KeyboardAvoidingView, Platform, Animated } from "react-native";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import Slider from '@react-native-community/slider';
@@ -66,6 +66,7 @@ export default function ExploreScreen() {
   const [songUploading, setSongUploading] = useState(false);
   const [songUploaded, setSongUploaded] = useState(false);
   const [generateLoading, setGenerateLoading] = useState(false);
+  const progressAnim = useRef(new Animated.Value(0)).current;
   const [duration, setDuration] = useState<number>(30);
   const [syncToGrid, setSyncToGrid] = useState(false);
   
@@ -91,6 +92,38 @@ export default function ExploreScreen() {
                       mediaList.every(m => m.uploaded) && 
                       song !== null && 
                       songUploaded;
+
+  // Indeterminate progress bar animation while analyzing
+  const progressRunning = useRef(false);
+  useEffect(() => {
+    if (!generateLoading) {
+      progressRunning.current = false;
+      progressAnim.setValue(0);
+      return;
+    }
+    progressRunning.current = true;
+    const run = () => {
+      if (!progressRunning.current) return;
+      Animated.sequence([
+        Animated.timing(progressAnim, {
+          toValue: 0.7,
+          duration: 1200,
+          useNativeDriver: false,
+        }),
+        Animated.timing(progressAnim, {
+          toValue: 0,
+          duration: 300,
+          useNativeDriver: false,
+        }),
+      ]).start(({ finished }) => {
+        if (finished && progressRunning.current) run();
+      });
+    };
+    run();
+    return () => {
+      progressRunning.current = false;
+    };
+  }, [generateLoading]);
 
   async function uploadSingleFile(file: MediaItem, index: number): Promise<{ success: boolean; serverFilename?: string }> {
     const formData = new FormData();
@@ -345,6 +378,7 @@ export default function ExploreScreen() {
   }, [song?.uri]);
 
   async function createPreview() {
+    setGenerateLoading(true);
     try {
       const body = song?.name ? { song_filename: song.name } : {};
       console.log("[TRACE] createPreview: sending POST /analyze", {
@@ -388,6 +422,8 @@ export default function ExploreScreen() {
     } catch (err) {
       console.error(err);
       Alert.alert("Analyze Failed", "Check your network connection.");
+    } finally {
+      setGenerateLoading(false);
     }
   }
 
@@ -1021,7 +1057,22 @@ export default function ExploreScreen() {
             disabled={generateLoading || !allUploaded}
           >
             {generateLoading ? (
-              <ActivityIndicator color="#fff" size="small" />
+              <View style={styles.generateButtonProgressWrap}>
+                <Text style={styles.buttonText}>Analyzing…</Text>
+                <View style={styles.progressBarTrack}>
+                  <Animated.View
+                    style={[
+                      styles.progressBarFill,
+                      {
+                        width: progressAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: ["0%", "100%"],
+                        }),
+                      },
+                    ]}
+                  />
+                </View>
+              </View>
             ) : (
               <>
                 <Text style={styles.buttonIcon}>✨</Text>
@@ -1841,6 +1892,24 @@ const styles = StyleSheet.create({
     backgroundColor: "#cbd5e1",
     shadowColor: "#000",
     shadowOpacity: 0.1,
+  },
+  generateButtonProgressWrap: {
+    width: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+  },
+  progressBarTrack: {
+    width: "100%",
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "rgba(255,255,255,0.35)",
+    overflow: "hidden",
+  },
+  progressBarFill: {
+    height: "100%",
+    borderRadius: 3,
+    backgroundColor: "#fff",
   },
   buttonIcon: {
     fontSize: 24,

@@ -538,6 +538,19 @@ async def get_analyze_result_for_preview():
 async def export_video(body: Optional[dict] = Body(None)):
     """Run clip_maker (ffmpeg). Uses segments from request body if provided, else stored segments.json."""
     try:
+        raw_segments = (body or {}).get("segments") or []
+        seg_count = len(raw_segments)
+        print(f"[TRACE] /export received: body_keys={list((body or {}).keys())}, segments_count={seg_count}")
+        if raw_segments:
+            total_from_segments = raw_segments[-1].get("endTime", raw_segments[-1].get("end_time"))
+            print(f"[TRACE] /export total duration from last segment endTime: {total_from_segments}")
+            for i, s in enumerate(raw_segments):
+                st = s.get("startTime", s.get("start_time"))
+                et = s.get("endTime", s.get("end_time"))
+                cs = s.get("clipStart", s.get("clip_start"))
+                ce = s.get("clipEnd", s.get("clip_end"))
+                fn = s.get("clipFilename", s.get("clip_filename"))
+                print(f"[TRACE] /export segment[{i}]: startTime={st}, endTime={et}, clipStart={cs}, clipEnd={ce}, clipFilename={fn}")
         if not AI_VENV_PYTHON.exists():
             return {"success": False, "error": f"AI Python not found at {AI_VENV_PYTHON}"}
         segments_file = Path("uploads/segments.json")
@@ -546,13 +559,26 @@ async def export_video(body: Optional[dict] = Body(None)):
             normalized = [_normalize_segment_for_preview(s) for s in raw]
             with open(segments_file, "w") as f:
                 json.dump(normalized, f, indent=2)
-            # normalized includes clipStart/clipEnd so clip in/out is preserved for export
+            print(f"[TRACE] /export wrote segments.json: {len(normalized)} segments, path={segments_file.absolute()}")
+            if normalized:
+                n0 = normalized[0]
+                print(f"[TRACE] /export segments.json first: startTime={n0['startTime']}, endTime={n0['endTime']}, clipStart={n0['clipStart']}, clipEnd={n0['clipEnd']}")
+        else:
+            print(f"[TRACE] /export NOT writing segments (no body or no segments); using existing segments.json")
         if not segments_file.exists():
             return {"success": False, "error": "segments.json not found. Call POST /analyze first or send segments in body."}
         env = os.environ.copy()
         with open(Path("uploads/options.json")) as f:
             opts = json.load(f)
         env["MAX_DURATION"] = str(opts.get("max_duration", 60))
+        final_videos_path = Path("uploads/final_videos")
+        mtime_before = None
+        if final_videos_path.exists():
+            videos_before = [f for f in final_videos_path.iterdir() if f.is_file() and f.suffix.lower() == ".mp4"]
+            if videos_before:
+                mtime_before = max(f.stat().st_mtime for f in videos_before)
+                print(f"[TRACE] /export mtime_before={mtime_before}")
+        print(f"[TRACE] /export starting clip_maker (cwd={AI_DIR}) ...")
         process = subprocess.Popen(
             [str(AI_VENV_PYTHON), str(CLIP_MAKER_SCRIPT)],
             cwd=str(AI_DIR),
@@ -564,17 +590,28 @@ async def export_video(body: Optional[dict] = Body(None)):
         for line in process.stdout:
             print(line, end="")
         process.wait()
-        if process.returncode != 0:
-            return {"success": False, "error": f"clip_maker exited with code {process.returncode}"}
-        final_videos_path = Path("uploads/final_videos")
+        code = process.returncode
+        print(f"[TRACE] /export clip_maker exited with code={code}")
+        if code != 0:
+            return {"success": False, "error": f"clip_maker exited with code {code}"}
         latest_video = None
         if final_videos_path.exists():
             videos = [f for f in final_videos_path.iterdir() if f.is_file() and f.suffix.lower() == ".mp4"]
             if videos:
                 latest = max(videos, key=lambda x: x.stat().st_mtime)
+                mtime_after = latest.stat().st_mtime
+                if mtime_before is not None and mtime_after <= mtime_before:
+                    print(f"[TRACE] /export no new video (mtime_after={mtime_after} <= mtime_before={mtime_before}); refusing to return stale file")
+                    return {"success": False, "error": "Export did not produce a new video. Try analyzing again, then export."}
                 latest_video = {"name": latest.name, "url": f"/files/final_videos/{latest.name}", "size": latest.stat().st_size}
+                print(f"[TRACE] /export returning latest_video: name={latest.name}, mtime={mtime_after}, total_files={len(videos)}")
+            else:
+                print(f"[TRACE] /export final_videos dir empty, no video to return")
+        else:
+            print(f"[TRACE] /export final_videos path does not exist")
         return {"success": True, "final_video": latest_video}
     except Exception as e:
+        print(f"[TRACE] /export exception: {e}")
         return {"success": False, "error": str(e)}
 
 

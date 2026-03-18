@@ -1,17 +1,26 @@
-import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, ActivityIndicator, Animated } from "react-native";
-import { useRouter } from "expo-router";
+import React, { useEffect, useState, useRef } from "react";
+import { View, Text, StyleSheet, ActivityIndicator, Animated, Alert } from "react-native";
+import { useRouter, useLocalSearchParams } from "expo-router";
 import { SERVER_URL } from "../config";
+import { useAnalyze } from "../context/AnalyzeContext";
 
 export default function LoadingScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ mode?: string }>();
+  const { pendingExportSegments, setPendingExportSegments, exportSegmentsRef } = useAnalyze();
+  const isExport = params.mode === "export";
+  const exportModeRef = useRef(isExport);
+  exportModeRef.current = isExport;
+  const exportStartedRef = useRef(false);
+
   const [progress, setProgress] = useState(0);
-  const [status, setStatus] = useState("Initializing...");
-  const pulseAnim = new Animated.Value(1);
-  const hasNavigated = React.useRef(false);
+
+  console.log("[TRACE] loading mount/render", { params, isExport, mode: params.mode });
+  const [status, setStatus] = useState(isExport ? "Preparing export…" : "Initializing...");
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const hasNavigated = useRef(false);
 
   useEffect(() => {
-    // Pulse animation
     Animated.loop(
       Animated.sequence([
         Animated.timing(pulseAnim, {
@@ -26,8 +35,112 @@ export default function LoadingScreen() {
         }),
       ])
     ).start();
+  }, []);
 
-    // Simulate progress
+  // Export mode: run POST /export, then navigate to result
+  useEffect(() => {
+    if (!isExport) return;
+    // Only run once so we don't send a second request with stale/empty segments (e.g. React Strict Mode double-mount).
+    if (exportStartedRef.current) return;
+    exportStartedRef.current = true;
+
+    // Prefer ref (set synchronously before navigate); state may still be stale when we mount.
+    const fromRef = exportSegmentsRef.current;
+    const segments = fromRef ?? pendingExportSegments ?? [];
+    exportSegmentsRef.current = null;
+    const body = segments.length > 0 ? { segments } : undefined;
+    const first = segments[0];
+    const last = segments.length > 0 ? segments[segments.length - 1] : null;
+    console.log("[TRACE] loading export: segments to send", {
+      count: segments.length,
+      fromRef: fromRef != null,
+      bodyUndefined: body == null,
+      firstSegment: first
+        ? {
+            startTime: first.startTime,
+            endTime: first.endTime,
+            clipFilename: first.clipFilename,
+            clipStart: first.clipStart,
+            clipEnd: first.clipEnd,
+          }
+        : null,
+      lastSegment: last
+        ? { startTime: last.startTime, endTime: last.endTime, clipEnd: last.clipEnd }
+        : null,
+    });
+
+    const progressSteps = [
+      { time: 500, progress: 15, status: "Exporting…" },
+      { time: 2000, progress: 35, status: "Rendering segments…" },
+      { time: 4000, progress: 55, status: "Mixing video…" },
+      { time: 6000, progress: 75, status: "Finalizing…" },
+    ];
+    progressSteps.forEach(({ time, progress: p, status: s }) => {
+      setTimeout(() => {
+        setProgress(p);
+        setStatus(s);
+      }, time);
+    });
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${SERVER_URL}/export`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        const data = await res.json();
+        console.log("[TRACE] loading export: response", {
+          success: data.success,
+          error: data.error,
+          final_video_name: data.final_video?.name,
+          final_video_url: data.final_video?.url,
+        });
+        if (cancelled || hasNavigated.current) return;
+        if (!data.success) {
+          setPendingExportSegments(null);
+          Alert.alert("Export Failed", data.error || "Unknown error", [
+            { text: "OK", onPress: () => router.replace("/preview") },
+          ]);
+          return;
+        }
+        const video = data.final_video;
+        if (video?.url != null && video?.name != null) {
+          hasNavigated.current = true;
+          setProgress(100);
+          setStatus("Complete!");
+          setPendingExportSegments(null);
+          setTimeout(() => {
+            router.replace({
+              pathname: "/result",
+              params: { videoUrl: video.url, videoName: video.name },
+            });
+          }, 400);
+        } else {
+          setPendingExportSegments(null);
+          Alert.alert("Export Failed", "No video returned.", [
+            { text: "OK", onPress: () => router.replace("/preview") },
+          ]);
+        }
+      } catch (err) {
+        if (cancelled || hasNavigated.current) return;
+        console.error(err);
+        setPendingExportSegments(null);
+        Alert.alert("Export Failed", "Check your network connection.", [
+          { text: "OK", onPress: () => router.replace("/preview") },
+        ]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isExport]);
+
+  // Legacy mode: poll /latest-video (e.g. when navigated without mode=export)
+  useEffect(() => {
+    if (isExport) return;
+
     const progressSteps = [
       { time: 1000, progress: 10, status: "Analyzing audio..." },
       { time: 3000, progress: 25, status: "Detecting beats..." },
@@ -37,33 +150,31 @@ export default function LoadingScreen() {
       { time: 16000, progress: 85, status: "Syncing to music..." },
       { time: 20000, progress: 95, status: "Finalizing video..." },
     ];
-
-    progressSteps.forEach(({ time, progress, status }) => {
+    progressSteps.forEach(({ time, progress: p, status: s }) => {
       setTimeout(() => {
-        setProgress(progress);
-        setStatus(status);
+        setProgress(p);
+        setStatus(s);
       }, time);
     });
 
-    // Poll for completion
     const pollInterval = setInterval(async () => {
       try {
+        if (exportModeRef.current) {
+          console.log("[TRACE] loading poll: skip (export mode)");
+          return;
+        }
         const res = await fetch(`${SERVER_URL}/latest-video`);
         const data = await res.json();
-        
-        if (data.found && !hasNavigated.current) {
+        if (data.found && !hasNavigated.current && !exportModeRef.current) {
+          console.log("[TRACE] loading poll: navigating to result", { url: data.url, name: data.name });
           hasNavigated.current = true;
           clearInterval(pollInterval);
           setProgress(100);
           setStatus("Complete!");
-          
           setTimeout(() => {
             router.push({
               pathname: "/result",
-              params: { 
-                videoUrl: data.url,
-                videoName: data.name
-              }
+              params: { videoUrl: data.url, videoName: data.name },
             });
           }, 500);
         }
@@ -71,15 +182,16 @@ export default function LoadingScreen() {
         console.error("Poll error:", err);
       }
     }, 2000);
-
     return () => clearInterval(pollInterval);
-  }, []);
+  }, [isExport]);
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Creating Magic</Text>
-        <Text style={styles.headerSubtitle}>Hang tight, AI is working...</Text>
+        <Text style={styles.headerTitle}>{isExport ? "Exporting" : "Creating Magic"}</Text>
+        <Text style={styles.headerSubtitle}>
+          {isExport ? "Rendering your video…" : "Hang tight, AI is working..."}
+        </Text>
       </View>
 
       <View style={styles.content}>

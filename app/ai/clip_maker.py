@@ -250,30 +250,6 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
     y, sr = librosa.load(audio_path, sr=44100, mono=False)
     full_duration = librosa.get_duration(y=y, sr=sr)
     
-    # Apply max duration limit
-    if max_duration and max_duration > 0:
-        duration = min(max_duration, full_duration)
-        
-        # Trim audio if needed
-        if duration < full_duration:
-            max_samples = int(duration * sr)
-            if y.ndim == 1:
-                y = y[:max_samples]
-            else:
-                y = y[:, :max_samples]
-            
-            # Save trimmed audio temporarily
-            temp_audio = "temp_trimmed_audio.wav"
-            sf.write(temp_audio, y.T if y.ndim > 1 else y, sr)
-            audio_path = temp_audio
-            
-            print(f"   ⏱️  Generating {duration:.2f}s video (trimmed from {full_duration:.2f}s)\n")
-        else:
-            print(f"   Duration: {duration:.2f}s\n")
-    else:
-        duration = full_duration
-        print(f"   Duration: {duration:.2f}s\n")
-    
     # Build list of segment specs: either from precomputed_segments or from cut_points + clip_manager
     segment_specs = []
     if precomputed_segments:
@@ -294,7 +270,41 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
                 'clip_duration': in_clip_duration,
             })
         print(f"⚡ Using {len(segment_specs)} precomputed segments...")
+        # Duration = end time of last segment (user's edit), capped by audio length
+        duration_from_segments = precomputed_segments[-1]['endTime']
+        duration = min(duration_from_segments, full_duration)
+        print(f"   📐 Duration from segments: {duration_from_segments:.2f}s (capped by audio: {duration:.2f}s)")
+        if duration < full_duration:
+            max_samples = int(duration * sr)
+            if y.ndim == 1:
+                y = y[:max_samples]
+            else:
+                y = y[:, :max_samples]
+            temp_audio = "temp_trimmed_audio.wav"
+            sf.write(temp_audio, y.T if y.ndim > 1 else y, sr)
+            audio_path = temp_audio
+            print(f"   ⏱️  Audio trimmed to {duration:.2f}s\n")
+        else:
+            print(f"   Duration: {duration:.2f}s\n")
     else:
+        # Apply max duration limit when not using precomputed segments
+        if max_duration and max_duration > 0:
+            duration = min(max_duration, full_duration)
+            if duration < full_duration:
+                max_samples = int(duration * sr)
+                if y.ndim == 1:
+                    y = y[:max_samples]
+                else:
+                    y = y[:, :max_samples]
+                temp_audio = "temp_trimmed_audio.wav"
+                sf.write(temp_audio, y.T if y.ndim > 1 else y, sr)
+                audio_path = temp_audio
+                print(f"   ⏱️  Generating {duration:.2f}s video (trimmed from {full_duration:.2f}s)\n")
+            else:
+                print(f"   Duration: {duration:.2f}s\n")
+        else:
+            duration = full_duration
+            print(f"   Duration: {duration:.2f}s\n")
         cut_points = [p for p in cut_points if p['timestamp'] < duration]
         timestamps = [{'timestamp': 0, 'type': 'start', 'score': 0}] + cut_points + [{'timestamp': duration, 'type': 'end', 'score': 0}]
         timestamps = _split_long_segments(timestamps, MAX_SEGMENT_DURATION)
@@ -451,6 +461,7 @@ def main():
     audio_folder_abs = os.path.join(project_root, "backend", "uploads", "songs")
     output_folder_abs = os.path.join(project_root, "backend", "uploads", "final_videos")
     options_file = os.path.join(project_root, "backend", "uploads", "options.json")
+    segments_path = os.path.join(os.path.dirname(output_folder_abs), "segments.json")
     
     # Load options to find which song to process
     target_song = None
@@ -464,6 +475,55 @@ def main():
                     print(f"   Target song: {target_song}\n")
         except Exception as e:
             print(f"⚠️  Error reading options.json: {e}\n")
+    
+    # Export-only path: segments.json was written by POST /export; use it without requiring audio_analysis.json
+    precomputed_segments = None
+    if os.path.exists(segments_path) and target_song:
+        try:
+            with open(segments_path, 'r') as f:
+                precomputed_segments = json.load(f)
+        except Exception as e:
+            print(f"⚠️  Could not load segments.json: {e}")
+    if precomputed_segments and target_song:
+        print(f"📤 Export-only mode: using {len(precomputed_segments)} segments from segments.json (no analysis required)\n")
+        clip_manager = ClipManager(clips_folder_abs)
+        if not clip_manager.clips:
+            print(f"❌ No video clips found in '{CLIPS_FOLDER}'!\n")
+            return
+        if not os.path.exists(output_folder_abs):
+            os.makedirs(output_folder_abs)
+        # Find audio file (match by name with or without extension)
+        audio_files = [f for f in os.listdir(audio_folder_abs)
+                       if f.lower().endswith(('.mp3', '.wav', '.m4a')) or ('.' not in f and not f.startswith('.'))]
+        base_target = target_song.rsplit('.', 1)[0]
+        audio_path = None
+        for f in audio_files:
+            if f == target_song or f.rsplit('.', 1)[0] == base_target or f == base_target:
+                audio_path = os.path.join(audio_folder_abs, f)
+                break
+        if not audio_path or not os.path.exists(audio_path):
+            print(f"⚠️  Audio file not found for: {target_song}")
+            print(f"   Searched in: {audio_folder_abs}\n")
+            return
+        video_filename = base_target + '_final.mp4'
+        video_filename = sanitize_filename(video_filename)
+        output_path = os.path.join(output_folder_abs, video_filename)
+        print(f"🎵 Export: {target_song} -> {video_filename}\n")
+        try:
+            create_video_ultrafast(
+                audio_path, [], clip_manager, output_path,
+                max_duration=MAX_DURATION,
+                precomputed_segments=precomputed_segments
+            )
+            print("="*60)
+            print(f"✅ Video created in '{OUTPUT_FOLDER}'!")
+            print(f"   Final filename: {video_filename}")
+            print("="*60 + "\n")
+        except Exception as e:
+            print(f"❌ Error creating video: {e}\n")
+            import traceback
+            traceback.print_exc()
+        return
     
     # Check for analysis file
     if not os.path.exists(analysis_json_path):
@@ -566,20 +626,21 @@ def main():
     
     cut_points = data.get('cut_points', [])
     
-    if not cut_points:
-        print("   ⚠️  No cut points found, skipping...\n")
-        return
-    
-    # Use precomputed segments from POST /analyze if present (export-only path)
+    # Load precomputed segments from POST /export (segments.json) first; export path does not need cut_points
     segments_path = os.path.join(os.path.dirname(output_folder_abs), "segments.json")
     precomputed_segments = None
     if os.path.exists(segments_path):
         try:
             with open(segments_path, 'r') as f:
                 precomputed_segments = json.load(f)
-            print(f"   Using {len(precomputed_segments)} precomputed segments from segments.json")
+            if precomputed_segments:
+                print(f"   Using {len(precomputed_segments)} precomputed segments from segments.json")
         except Exception as e:
             print(f"   ⚠️  Could not load segments.json: {e}")
+    
+    if not cut_points and not precomputed_segments:
+        print("   ⚠️  No cut points and no precomputed segments, skipping...\n")
+        return
     
     try:
         create_video_ultrafast(

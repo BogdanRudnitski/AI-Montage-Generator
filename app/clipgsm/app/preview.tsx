@@ -111,7 +111,7 @@ interface PlayItem {
 // Preview uses only local data: clip URIs from ImagePicker (mediaList), segment data from in-memory analyzeResult. No video fetch from backend.
 export default function PreviewScreen() {
   const router = useRouter();
-  const { analyzeResult, mediaList, songUri, setMediaListForPreview } = useAnalyze();
+  const { analyzeResult, mediaList, songUri, setMediaListForPreview, setPendingExportSegments, exportSegmentsRef } = useAnalyze();
   const NUM_VIDEO_SLOTS = 3;
   const videoRefs = [useRef<Video>(null), useRef<Video>(null), useRef<Video>(null)];
   const fileDurationByUriRef = useRef<Record<string, number>>({});
@@ -125,8 +125,6 @@ export default function PreviewScreen() {
   const [playbackEnded, setPlaybackEnded] = useState(false);
   const [selectedSegmentIndex, setSelectedSegmentIndex] = useState<number | null>(null);
   const [replaceSelectionPending, setReplaceSelectionPending] = useState<{ uri: string; filename: string } | null>(null);
-  const [isExporting, setIsExporting] = useState(false);
-  const [logsExportFeedback, setLogsExportFeedback] = useState<null | "Logs copied" | "Logs printed">(null);
   const [thumbnailUris, setThumbnailUris] = useState<(string | null)[]>([]);
   const [thumbnailFrameUris, setThumbnailFrameUris] = useState<(string | null)[][]>([]);
   const [timelineScrollX, setTimelineScrollX] = useState(0);
@@ -639,6 +637,34 @@ export default function PreviewScreen() {
     if (__DEV__) debugLog("replace-segment", { segmentIndex: idx, filename, newClipStart, newClipEnd });
   };
 
+  /** Remove the selected segment from the timeline. Shifts subsequent segment times. */
+  const deleteSelectedSegment = () => {
+    const idx = selectedSegmentIndex;
+    if (idx == null || idx < 0 || idx >= segments.length) return;
+    if (segments.length <= 1) {
+      Alert.alert("Can't delete", "Keep at least one segment.");
+      return;
+    }
+    const seg = segments[idx];
+    const removedDuration = seg.endTime - seg.startTime;
+    const next = segments
+      .filter((_, i) => i !== idx)
+      .map((s, i) => (i >= idx ? { ...s, startTime: s.startTime - removedDuration, endTime: s.endTime - removedDuration } : s));
+    setSegments(next);
+    setSelectedSegmentIndex(null);
+    if (currentSegmentIndex === idx) {
+      setCurrentSegmentIndex(Math.min(idx, next.length - 1));
+    } else if (currentSegmentIndex > idx) {
+      setCurrentSegmentIndex(currentSegmentIndex - 1);
+    }
+    const newTotal = next.length > 0 ? next[next.length - 1].endTime : 0;
+    if (timelineTimeRef.current >= newTotal) {
+      timelineTimeRef.current = Math.max(0, newTotal - 0.1);
+      setPlayheadTime(timelineTimeRef.current);
+    }
+    if (__DEV__) debugLog("delete-segment", { index: idx, newCount: next.length });
+  };
+
   /** Open user's media library to pick a video; add to project media and open in-clip selection modal. */
   const handleReplaceFromLibrary = async () => {
     if (selectedSegmentIndex == null) return;
@@ -953,30 +979,12 @@ export default function PreviewScreen() {
       const nextSeg = playList[destinationIndex];
       if (!nextSeg) return;
       const nextVisibleSlot = (visiblePlaybackSlotRef.current + 1) % 3;
-      visiblePlaybackSlotRef.current = nextVisibleSlot;
-      setVisiblePlaybackSlot(nextVisibleSlot);
-      currentIndexRef.current = destinationIndex;
-      segmentBoundsRef.current = {
-        startTime: nextSeg.startTime,
-        endTime: nextSeg.endTime,
-      };
-      timelineTimeRef.current = nextSeg.startTime;
-      setPlayheadTime(nextSeg.startTime);
-      segmentStartTimeRef.current = Date.now() / 1000;
-      if (__DEV__) debugLog("advanceTo-commit", { to: destinationIndex });
-      debugLog("advanceTo-sync", {
-        destinationIndex,
-        startTime: nextSeg.startTime,
-        endTime: nextSeg.endTime,
-      });
-      debugLog("segment-enter", {
-        idx: destinationIndex,
-        startTime: nextSeg.startTime,
-        endTime: nextSeg.endTime,
-      });
-
       const fromSlot = currentVisibleSlotRef.current;
       const fromRef = getMountedVideoRef(fromSlot);
+      const toRef = getMountedVideoRef(nextVisibleSlot);
+      const seekSec = options?.seekToClipPosition ?? clampToFileDuration(nextSeg.uri, nextSeg.clipStart);
+      const seekMs = seekSec * 1000;
+
       if (fromRef) {
         fromRef.pauseAsync().catch((e: unknown) => {
           console.warn("[Preview] advanceTo: pause current video failed", e);
@@ -989,41 +997,78 @@ export default function PreviewScreen() {
         toVisibleSlot: nextVisibleSlot,
         destinationIndex,
       });
-      setCurrentSegmentIndex(destinationIndex);
 
-      const farSlot = (nextVisibleSlot + 2) % 3;
-      const preloadIndex = destinationIndex + 2;
-      const preloadSeg = playList[preloadIndex];
-      if (preloadSeg?.uri) {
-        if (__DEV__) debugLog("playback-slot-preload", { farSlot, preloadIndex });
-        const preloadRef = getMountedVideoRef(farSlot);
-        if (preloadRef) {
-          const token = ++slotSeekTokenRef.current[farSlot];
-          preloadRef
-            .setPositionAsync(clampToFileDuration(preloadSeg.uri, preloadSeg.clipStart) * 1000)
-            .catch(() => {})
-            .finally(() => {
-              if (token !== slotSeekTokenRef.current[farSlot]) {
-                if (__DEV__) debugLog("seek-token-stale", { slot: farSlot, token });
-              }
+      if (toRef) {
+        const token = ++slotSeekTokenRef.current[nextVisibleSlot];
+        toRef
+          .setPositionAsync(seekMs, { toleranceMillisBefore: 0, toleranceMillisAfter: 0 })
+          .then(() => toRef.playAsync())
+          .then(() => toRef.pauseAsync())
+          .then(() => {
+            if (token !== slotSeekTokenRef.current[nextVisibleSlot]) {
+              if (__DEV__) debugLog("seek-token-stale", { slot: nextVisibleSlot, token });
+              return;
+            }
+            visiblePlaybackSlotRef.current = nextVisibleSlot;
+            setVisiblePlaybackSlot(nextVisibleSlot);
+            currentIndexRef.current = destinationIndex;
+            segmentBoundsRef.current = {
+              startTime: nextSeg.startTime,
+              endTime: nextSeg.endTime,
+            };
+            timelineTimeRef.current = nextSeg.startTime;
+            setPlayheadTime(nextSeg.startTime);
+            segmentStartTimeRef.current = Date.now() / 1000;
+            setCurrentSegmentIndex(destinationIndex);
+            if (__DEV__) debugLog("advanceTo-commit", { to: destinationIndex });
+            debugLog("advanceTo-sync", {
+              destinationIndex,
+              startTime: nextSeg.startTime,
+              endTime: nextSeg.endTime,
             });
-        } else if (__DEV__) debugLog("slot-ref-null", { slot: farSlot, action: "preload" });
-      }
+            debugLog("segment-enter", {
+              idx: destinationIndex,
+              startTime: nextSeg.startTime,
+              endTime: nextSeg.endTime,
+            });
 
-      if (options?.seekToClipPosition != null) {
-        const toRef = getMountedVideoRef(nextVisibleSlot);
-        if (toRef) {
-          const token = ++slotSeekTokenRef.current[nextVisibleSlot];
-          const seekMs = options.seekToClipPosition * 1000;
-          toRef
-            .setPositionAsync(seekMs, { toleranceMillisBefore: 0, toleranceMillisAfter: 0 })
-            .catch(() => {})
-            .finally(() => {
-              if (token !== slotSeekTokenRef.current[nextVisibleSlot]) {
-                if (__DEV__) debugLog("seek-token-stale", { slot: nextVisibleSlot, token });
-              }
-            });
-        } else if (__DEV__) debugLog("slot-ref-null", { slot: nextVisibleSlot, action: "seekToClipPosition" });
+            const farSlot = (nextVisibleSlot + 2) % 3;
+            const preloadIndex = destinationIndex + 2;
+            const preloadSeg = playList[preloadIndex];
+            if (preloadSeg?.uri) {
+              const preloadRef = getMountedVideoRef(farSlot);
+              if (preloadRef) {
+                if (__DEV__) debugLog("playback-slot-preload", { farSlot, preloadIndex });
+                const startMs = clampToFileDuration(preloadSeg.uri, preloadSeg.clipStart) * 1000;
+                preloadRef
+                  .setPositionAsync(startMs, { toleranceMillisBefore: 0, toleranceMillisAfter: 0 })
+                  .then(() => preloadRef.playAsync())
+                  .then(() => preloadRef.pauseAsync())
+                  .catch(() => {});
+              } else if (__DEV__) debugLog("slot-ref-null", { slot: farSlot, action: "preload" });
+            }
+          })
+          .catch((e) => {
+            if (__DEV__) console.warn("[Preview] advanceTo: toRef seek/warm failed", e);
+            visiblePlaybackSlotRef.current = nextVisibleSlot;
+            setVisiblePlaybackSlot(nextVisibleSlot);
+            currentIndexRef.current = destinationIndex;
+            segmentBoundsRef.current = { startTime: nextSeg.startTime, endTime: nextSeg.endTime };
+            timelineTimeRef.current = nextSeg.startTime;
+            setPlayheadTime(nextSeg.startTime);
+            segmentStartTimeRef.current = Date.now() / 1000;
+            setCurrentSegmentIndex(destinationIndex);
+          });
+      } else {
+        if (__DEV__) debugLog("slot-ref-null", { slot: nextVisibleSlot, action: "advanceTo" });
+        visiblePlaybackSlotRef.current = nextVisibleSlot;
+        setVisiblePlaybackSlot(nextVisibleSlot);
+        currentIndexRef.current = destinationIndex;
+        segmentBoundsRef.current = { startTime: nextSeg.startTime, endTime: nextSeg.endTime };
+        timelineTimeRef.current = nextSeg.startTime;
+        setPlayheadTime(nextSeg.startTime);
+        segmentStartTimeRef.current = Date.now() / 1000;
+        setCurrentSegmentIndex(destinationIndex);
       }
     } catch (e) {
       console.error("[Preview] advanceTo crashed", e);
@@ -1263,52 +1308,26 @@ export default function PreviewScreen() {
   if (!analyzeResult) return null;
   const totalSegments = playList.length;
 
-  async function handleExport() {
-    try {
-      setIsExporting(true);
-      const body = segments.length > 0 ? { segments } : undefined;
-      const res = await fetch(`${SERVER_URL}/export`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: body ? JSON.stringify(body) : undefined,
-      });
-      const data = await res.json();
-      if (!data.success) {
-        Alert.alert("Export Failed", data.error || "Unknown error");
-        setIsExporting(false);
-        return;
-      }
-      const video = data.final_video;
-      if (video?.url != null && video?.name != null) {
-        router.replace({
-          pathname: "/result",
-          params: { videoUrl: video.url, videoName: video.name },
-        });
-      } else {
-        router.replace("/loading");
-      }
-    } catch (err) {
-      console.error(err);
-      Alert.alert("Export Failed", "Check your network connection.");
-    } finally {
-      setIsExporting(false);
-    }
+  function handleExport() {
+    // Set ref synchronously so loading screen sees correct segments (state update is async).
+    const toExport = segments.length > 0 ? segments.slice() : [];
+    const totalDurationSec = toExport.length > 0 ? toExport[toExport.length - 1].endTime : 0;
+    console.log("[TRACE] preview Export: segments as decided by user", {
+      count: toExport.length,
+      totalDurationSec,
+      segments: toExport.map((s, i) => ({
+        i,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        clipFilename: s.clipFilename,
+        clipStart: s.clipStart,
+        clipEnd: s.clipEnd,
+      })),
+    });
+    exportSegmentsRef.current = toExport;
+    setPendingExportSegments(toExport);
+    router.replace("/loading?mode=export");
   }
-
-  const handleExportLogs = async () => {
-    if (typeof __DEV__ === "undefined" || !__DEV__) return;
-    const json = JSON.stringify(perfLogBuffer, null, 2);
-    try {
-      const Clipboard = require("expo-clipboard").default;
-      await Clipboard.setStringAsync(json);
-      setLogsExportFeedback("Logs copied");
-    } catch {
-      console.log("[Preview] perf log export:", json);
-      setLogsExportFeedback("Logs printed");
-    }
-    setTimeout(() => setLogsExportFeedback(null), 2000);
-  };
-  const logsFeedbackText = logsExportFeedback ?? "Export Logs";
 
   return (
     <View style={styles.container}>
@@ -1318,43 +1337,13 @@ export default function PreviewScreen() {
         </TouchableOpacity>
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Preview</Text>
-          <Text style={styles.headerSubtitle}>Music + clips · Tap Export to render</Text>
+          <Text style={styles.headerSubtitle}>Music + clips · Export to render</Text>
         </View>
         <TouchableOpacity
-          style={styles.pauseButton}
-          onPress={() => {
-            if (playbackEnded) {
-              // User pressed play again after timeline ended: reset to start.
-              finishedSegmentsRef.current.clear();
-              timelineTimeRef.current = 0;
-              setPlayheadTime(0);
-              setCurrentSegmentIndex(0);
-              const first = playList[0];
-              if (first) {
-                segmentBoundsRef.current = { startTime: first.startTime, endTime: first.endTime };
-                segmentStartTimeRef.current = Date.now() / 1000;
-              }
-              currentIndexRef.current = 0;
-              const ref = getMountedVideoRef(visibleSlotIndex);
-              if (ref) ref.setPositionAsync(0).catch(() => {});
-              soundRef.current?.setPositionAsync(0).catch(() => {});
-              setPlaybackEnded(false);
-              setIsPlaying(true);
-              soundRef.current?.playAsync().catch(() => {});
-              return;
-            }
-            const next = !isPlaying;
-            setIsPlaying(next);
-            if (!next) {
-              const ref = getMountedVideoRef(visibleSlotIndex);
-              if (ref) ref.pauseAsync().catch(() => {});
-              soundRef.current?.pauseAsync().catch(() => {});
-            } else {
-              soundRef.current?.playAsync().catch(() => {});
-            }
-          }}
+          style={styles.headerExportButton}
+          onPress={handleExport}
         >
-          <Ionicons name={isPlaying ? "pause" : "play"} size={24} color="#fff" />
+          <Ionicons name="arrow-forward" size={26} color="#fff" />
         </TouchableOpacity>
       </View>
       <View style={styles.previewArea}>
@@ -1392,18 +1381,20 @@ export default function PreviewScreen() {
                     const segmentIndex = getSegmentIndexForPlaybackSlot(slot);
                     const item = playList[segmentIndex];
                     const isVisible = slot === visiblePlaybackSlot;
+                    const uri = item?.uri ?? playList[0]?.uri ?? "";
                     return (
                       <View key={slot} style={styles.slotLayer}>
-                        {item?.uri ? (
+                        {uri ? (
                           <Video
                             ref={videoRefs[slot]}
-                            source={{ uri: item.uri }}
+                            source={{ uri }}
                             style={[styles.video, isVisible ? styles.videoVisible : styles.videoHidden]}
                             resizeMode={ResizeMode.CONTAIN}
                             shouldPlay={isPlaying && isVisible && !isScrubbing}
                             isLooping={false}
                             volume={0}
                             muted
+                            progressUpdateIntervalMillis={16}
                             onPlaybackStatusUpdate={onPlaybackStatusUpdate(slot)}
                           />
                         ) : null}
@@ -1485,46 +1476,75 @@ export default function PreviewScreen() {
         />
       )}
       <View style={styles.footer}>
-        <TouchableOpacity
-          style={[styles.resizeModeButton, resizeMode === "trim" && styles.resizeModeButtonActive]}
-          onPress={() => setResizeMode((m) => (m === "moveCut" ? "trim" : "moveCut"))}
-        >
-          <Text style={[styles.resizeModeButtonText, resizeMode === "trim" && styles.resizeModeButtonTextActive]}>
-            {resizeMode === "moveCut" ? "Move cut" : "Trim"}
+        <View style={styles.segmentInfoRow}>
+          <Text style={styles.segmentInfoText}>
+            Segment {currentSegmentIndex + 1} / {totalSegments} · {(totalDuration || (analyzeResult?.duration ?? 0)).toFixed(1)}s
           </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.scissorsButton}
-          onPress={addCutAtPlayhead}
-          accessibilityLabel="Add cut at playhead"
-        >
-          <Ionicons name="cut" size={22} color="#475569" />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.replaceButton, selectedSegmentIndex == null && styles.replaceButtonDisabled]}
-          onPress={handleReplaceFromLibrary}
-          disabled={selectedSegmentIndex == null}
-          accessibilityLabel="Replace clip from library"
-        >
-          <Ionicons name="swap-horizontal" size={20} color={selectedSegmentIndex == null ? "#94a3b8" : "#475569"} />
-          <Text style={[styles.replaceButtonText, selectedSegmentIndex == null && styles.replaceButtonTextDisabled]}>Replace</Text>
-        </TouchableOpacity>
-        <Text style={styles.segmentInfo}>
-          Segment {currentSegmentIndex + 1} / {totalSegments} · {(totalDuration || (analyzeResult?.duration ?? 0)).toFixed(1)}s
-        </Text>
-        {__DEV__ && (
-          <TouchableOpacity style={styles.exportLogsButton} onPress={handleExportLogs}>
-            <Text style={styles.exportLogsButtonText}>{logsFeedbackText}</Text>
+        </View>
+        <View style={styles.footerButtonsRow}>
+          <TouchableOpacity
+            style={styles.playPauseButton}
+            onPress={() => {
+              if (playbackEnded) {
+                finishedSegmentsRef.current.clear();
+                timelineTimeRef.current = 0;
+                setPlayheadTime(0);
+                setCurrentSegmentIndex(0);
+                const first = playList[0];
+                if (first) {
+                  segmentBoundsRef.current = { startTime: first.startTime, endTime: first.endTime };
+                  segmentStartTimeRef.current = Date.now() / 1000;
+                }
+                currentIndexRef.current = 0;
+                const ref = getMountedVideoRef(visibleSlotIndex);
+                if (ref) ref.setPositionAsync(0).catch(() => {});
+                soundRef.current?.setPositionAsync(0).catch(() => {});
+                setPlaybackEnded(false);
+                setIsPlaying(true);
+                soundRef.current?.playAsync().catch(() => {});
+                return;
+              }
+              const next = !isPlaying;
+              setIsPlaying(next);
+              if (!next) {
+                const ref = getMountedVideoRef(visibleSlotIndex);
+                if (ref) ref.pauseAsync().catch(() => {});
+                soundRef.current?.pauseAsync().catch(() => {});
+              } else {
+                soundRef.current?.playAsync().catch(() => {});
+              }
+            }}
+          >
+            <Ionicons name={isPlaying ? "pause" : "play"} size={28} color="#fff" />
           </TouchableOpacity>
-        )}
-        <TouchableOpacity
-          style={[styles.exportButton, isExporting && styles.exportButtonDisabled]}
-          onPress={handleExport}
-          disabled={isExporting}
-        >
-          <Ionicons name="download-outline" size={24} color="#fff" />
-          <Text style={styles.exportButtonText}>{isExporting ? "Exporting…" : "Export video"}</Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.resizeModeButton, resizeMode === "trim" && styles.resizeModeButtonActive]}
+            onPress={() => setResizeMode((m) => (m === "moveCut" ? "trim" : "moveCut"))}
+          >
+            <Text style={[styles.resizeModeButtonText, resizeMode === "trim" && styles.resizeModeButtonTextActive]}>
+              {resizeMode === "moveCut" ? "Slide mode" : "Trim mode"}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.scissorsButton} onPress={addCutAtPlayhead} accessibilityLabel="Add cut at playhead">
+            <Ionicons name="cut" size={22} color="#475569" />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.replaceButton, selectedSegmentIndex == null && styles.replaceButtonDisabled]}
+            onPress={handleReplaceFromLibrary}
+            disabled={selectedSegmentIndex == null}
+            accessibilityLabel="Replace clip from library"
+          >
+            <Ionicons name="swap-horizontal" size={22} color={selectedSegmentIndex == null ? "#94a3b8" : "#475569"} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.deleteButton, selectedSegmentIndex == null && styles.deleteButtonDisabled]}
+            onPress={deleteSelectedSegment}
+            disabled={selectedSegmentIndex == null}
+            accessibilityLabel="Delete selected clip"
+          >
+            <Ionicons name="trash-outline" size={22} color={selectedSegmentIndex == null ? "#94a3b8" : "#dc2626"} />
+          </TouchableOpacity>
+        </View>
       </View>
 
       {replaceSelectionPending != null && selectedSegmentIndex != null && segments[selectedSegmentIndex] != null && (
@@ -1555,11 +1575,11 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   headerCenter: { flex: 1 },
-  pauseButton: {
+  headerExportButton: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    backgroundColor: "rgba(255, 255, 255, 0.25)",
     justifyContent: "center",
     alignItems: "center",
   },
@@ -1618,7 +1638,7 @@ const styles = StyleSheet.create({
     height: "100%",
   },
   videoVisible: { zIndex: 1 },
-  videoHidden: { zIndex: 0 },
+  videoHidden: { opacity: 0, position: "absolute" as const, zIndex: 0 },
   stripContainer: {
     backgroundColor: "#fff",
     paddingVertical: 10,
@@ -1734,48 +1754,54 @@ const styles = StyleSheet.create({
   },
   placeholderText: { color: "#fff", fontSize: 16, fontWeight: "700" },
   placeholderHint: { color: "#94a3b8", fontSize: 12, marginTop: 8 },
-  footer: { padding: 24, backgroundColor: "#fff", flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 12 },
+  footer: { paddingHorizontal: 24, paddingTop: 16, paddingBottom: 28, backgroundColor: "#fff" },
+  segmentInfoRow: { marginBottom: 14, alignItems: "center" },
+  segmentInfoText: { fontSize: 13, color: "#64748b", fontWeight: "600" },
+  footerButtonsRow: { flexDirection: "row", alignItems: "center", gap: 10, flexWrap: "wrap" },
+  playPauseButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: "#6366f1",
+    justifyContent: "center",
+    alignItems: "center",
+  },
   resizeModeButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    backgroundColor: "rgba(99, 102, 241, 0.2)",
-    borderRadius: 8,
+    height: 44,
+    minWidth: 108,
+    paddingHorizontal: 14,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "rgba(99, 102, 241, 0.15)",
+    borderRadius: 10,
   },
   resizeModeButtonActive: { backgroundColor: "#6366f1" },
   resizeModeButtonText: { color: "#6366f1", fontSize: 13, fontWeight: "600" },
   resizeModeButtonTextActive: { color: "#fff" },
   scissorsButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderRadius: 8,
+    width: 44,
+    height: 44,
+    borderRadius: 10,
     backgroundColor: "#f1f5f9",
     justifyContent: "center",
     alignItems: "center",
   },
   replaceButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderRadius: 8,
+    width: 44,
+    height: 44,
+    borderRadius: 10,
     backgroundColor: "#f1f5f9",
+    justifyContent: "center",
+    alignItems: "center",
   },
   replaceButtonDisabled: { opacity: 0.6 },
-  replaceButtonText: { fontSize: 13, fontWeight: "600", color: "#475569" },
-  replaceButtonTextDisabled: { color: "#94a3b8" },
-  segmentInfo: { fontSize: 14, color: "#64748b", marginBottom: 16, textAlign: "center", flex: 1 },
-  exportButton: {
-    backgroundColor: "#6366f1",
-    flexDirection: "row",
-    alignItems: "center",
+  deleteButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 10,
+    backgroundColor: "#fef2f2",
     justifyContent: "center",
-    gap: 10,
-    paddingVertical: 18,
-    borderRadius: 16,
+    alignItems: "center",
   },
-  exportButtonDisabled: { opacity: 0.7 },
-  exportButtonText: { color: "#fff", fontSize: 18, fontWeight: "800" },
-  exportLogsButton: { paddingVertical: 6, paddingHorizontal: 10 },
-  exportLogsButtonText: { fontSize: 11, color: "#94a3b8" },
+  deleteButtonDisabled: { opacity: 0.6, backgroundColor: "#f1f5f9" },
 });

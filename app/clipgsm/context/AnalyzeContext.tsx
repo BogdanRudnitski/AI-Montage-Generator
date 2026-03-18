@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode } from "react";
+import React, { createContext, useContext, useState, useCallback, useRef, ReactNode } from "react";
 
 export interface SegmentSpec {
   startTime: number;
@@ -25,9 +25,13 @@ interface AnalyzeContextValue {
   analyzeResult: AnalyzeResult | null;
   mediaList: MediaItemForPreview[];
   songUri: string | null;
+  pendingExportSegments: SegmentSpec[] | null;
+  /** Set synchronously before navigating to loading; read by loading screen so correct segments are sent. */
+  exportSegmentsRef: React.MutableRefObject<SegmentSpec[] | null>;
   setAnalyzeResult: (r: AnalyzeResult | null) => void;
   setMediaListForPreview: (list: MediaItemForPreview[]) => void;
   setSongUri: (uri: string | null) => void;
+  setPendingExportSegments: (segments: SegmentSpec[] | null) => void;
   clear: () => void;
 }
 
@@ -37,10 +41,14 @@ export function AnalyzeProvider({ children }: { children: ReactNode }) {
   const [analyzeResult, setAnalyzeResult] = useState<AnalyzeResult | null>(null);
   const [mediaList, setMediaListForPreview] = useState<MediaItemForPreview[]>([]);
   const [songUri, setSongUri] = useState<string | null>(null);
+  const [pendingExportSegments, setPendingExportSegments] = useState<SegmentSpec[] | null>(null);
+  const exportSegmentsRef = useRef<SegmentSpec[] | null>(null);
   const clear = useCallback(() => {
     setAnalyzeResult(null);
     setMediaListForPreview([]);
     setSongUri(null);
+    setPendingExportSegments(null);
+    exportSegmentsRef.current = null;
   }, []);
   return (
     <AnalyzeContext.Provider
@@ -48,9 +56,12 @@ export function AnalyzeProvider({ children }: { children: ReactNode }) {
         analyzeResult,
         mediaList,
         songUri,
+        pendingExportSegments,
+        exportSegmentsRef,
         setAnalyzeResult,
         setMediaListForPreview,
         setSongUri,
+        setPendingExportSegments,
         clear,
       }}
     >
