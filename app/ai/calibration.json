@@ -2,106 +2,106 @@
   "songs": {
     "Starships": {
       "type_bonuses": {
-        "drum_low": 15,
+        "drum_low": -15,
+        "drum_mid": -15,
         "pattern_change": -15,
         "unknown": -15,
-        "vocal_repetition": 15,
-        "vocal_transient": 0
+        "vocal_transient": 2
       },
-      "min_distance": 0.25,
+      "min_distance": 0.24,
       "score_threshold": 65.0,
       "density_profile": [
         {
           "start": 0.0,
           "end": 5.0,
           "target_cuts": 1,
-          "weight": 0.111
+          "weight": 0.1
         },
         {
           "start": 5.0,
           "end": 10.0,
           "target_cuts": 3,
-          "weight": 0.333
+          "weight": 0.3
         },
         {
           "start": 10.0,
           "end": 15.0,
           "target_cuts": 3,
-          "weight": 0.333
+          "weight": 0.3
         },
         {
           "start": 15.0,
           "end": 20.0,
-          "target_cuts": 9,
-          "weight": 1.0
+          "target_cuts": 6,
+          "weight": 0.6
         },
         {
           "start": 20.0,
           "end": 25.0,
-          "target_cuts": 5,
-          "weight": 0.556
+          "target_cuts": 2,
+          "weight": 0.2
         },
         {
           "start": 25.0,
           "end": 30.0,
           "target_cuts": 2,
-          "weight": 0.222
+          "weight": 0.2
         },
         {
           "start": 30.0,
           "end": 35.0,
           "target_cuts": 3,
-          "weight": 0.333
+          "weight": 0.3
         },
         {
           "start": 35.0,
           "end": 40.0,
           "target_cuts": 3,
-          "weight": 0.333
+          "weight": 0.3
         },
         {
           "start": 40.0,
           "end": 45.0,
-          "target_cuts": 6,
-          "weight": 0.667
+          "target_cuts": 3,
+          "weight": 0.3
         },
         {
           "start": 45.0,
           "end": 50.0,
           "target_cuts": 7,
-          "weight": 0.778
+          "weight": 0.7
         },
         {
           "start": 50.0,
           "end": 55.0,
-          "target_cuts": 5,
-          "weight": 0.556
+          "target_cuts": 7,
+          "weight": 0.7
         },
         {
           "start": 55.0,
           "end": 60.0,
-          "target_cuts": 7,
-          "weight": 0.778
+          "target_cuts": 10,
+          "weight": 1.0
         }
       ],
       "stats": {
-        "manual_cuts": 54,
-        "matched": 19,
+        "manual_cuts": 51,
+        "matched": 22,
         "false_positives": 37,
-        "fully_missed": 35,
-        "p10_gap": 0.291,
-        "avg_gap": 1.061
+        "fully_missed": 29,
+        "p10_gap": 0.283,
+        "avg_gap": 1.13
       }
     }
   },
   "type_bonuses": {
-    "drum_low": 15.0,
+    "drum_low": -15.0,
+    "drum_mid": -15.0,
     "pattern_change": -15.0,
     "unknown": -15.0,
-    "vocal_repetition": 15.0,
-    "vocal_transient": 0.0
+    "vocal_transient": 2.0
   },
-  "min_distance": 0.25,
+  "min_distance": 0.24,
   "score_threshold": 65.0,
   "songs_calibrated": 1
 }

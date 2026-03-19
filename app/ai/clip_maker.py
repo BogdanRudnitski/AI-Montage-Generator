@@ -336,7 +336,6 @@ def compute_segments_only(cut_points, duration, clip_manager, max_duration=None,
         start_time = timestamps[i]['timestamp']
         end_time = timestamps[i + 1]['timestamp']
         segment_duration = end_time - start_time
-        # Enforce min clip duration (match frontend; avoid zero-length)
         current_point = timestamps[i + 1]
         force_new_clip = current_point['type'] in BEAT_CHANGE_TYPES and current_point.get('score', 0) >= 20
         segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=force_new_clip)
@@ -484,102 +483,84 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
     
     for i, spec in enumerate(segment_specs):
         segment_output = os.path.join(temp_folder, f"segment_{i:04d}.mp4")
+
         clip_path = spec['clip_path']
         clip_start = spec['clip_start']
         segment_duration = spec['segment_duration']
         clip_duration = spec['clip_duration']
-        
+
+        # 🔥 FRAME-LOCKED DURATION (NO DRIFT)
+        frame_count = max(1, int(round(segment_duration * SEGMENT_FPS)))
+
         if clip_duration < segment_duration:
-            # Loop short clip and trim to exact duration
+            # LOOP CASE
             num_loops = int(np.ceil(segment_duration / clip_duration)) + 1
             loop_list = os.path.join(temp_folder, f"loop_{i:04d}.txt")
-            # Escape path for concat demuxer (single quotes)
+
             abs_path = os.path.abspath(clip_path)
             safe_path = abs_path.replace("'", "'\\''")
+
             with open(loop_list, 'w') as f:
                 for _ in range(num_loops):
                     f.write(f"file '{safe_path}'\n")
-            # Re-encode each segment into a unified CFR/pix_fmt so concat with -c copy stays stable.
-            # No portrait scaling here; scaling happens exactly once during the final export encode.
+
             segment_cmd = [
                 "ffmpeg",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                loop_list,
-                "-t",
-                str(segment_duration),
-                "-c:v",
-                VIDEO_ENCODER,
-                "-pix_fmt",
-                "yuv420p",
-                "-r",
-                str(SEGMENT_FPS),
-                "-vsync",
-                "cfr",
-                "-force_key_frames",
-                "expr:gte(t,0)",
-                "-avoid_negative_ts",
-                "make_zero",
+                "-fflags", "+genpts",                     # ✅ regenerate timestamps
+                "-f", "concat",
+                "-safe", "0",
+                "-i", loop_list,
+                "-frames:v", str(frame_count),            # ✅ exact frame count (NO DRIFT)
+                "-c:v", VIDEO_ENCODER,
+                "-pix_fmt", "yuv420p",
+                "-r", str(SEGMENT_FPS),                   # ✅ keep CFR
+                "-vsync", "cfr",
+                "-video_track_timescale", "90000",        # ✅ consistent timebase
+                "-avoid_negative_ts", "make_zero",
                 "-an",
                 "-y",
                 segment_output,
             ]
-            if VIDEO_ENCODER == "libx264":
-                segment_cmd.extend(["-preset", "medium", "-crf", "23"])
-            else:
-                segment_cmd.extend(["-b:v", "6M", "-maxrate", "8M", "-bufsize", "12M"])
 
-            _run_ffmpeg(segment_cmd, step_name=f"segment_{i} (encode loop)")
         else:
-            # Encode each segment into a unified CFR/pix_fmt so concat with -c copy stays stable.
-            # No portrait scaling here; scaling happens exactly once during the final export encode.
+            # NORMAL CUT CASE
             segment_cmd = [
                 "ffmpeg",
-                "-i",
-                clip_path,
-                "-ss",
-                str(clip_start),
-                "-t",
-                str(segment_duration),
-                "-c:v",
-                VIDEO_ENCODER,
-                "-pix_fmt",
-                "yuv420p",
-                "-r",
-                str(SEGMENT_FPS),
-                "-vsync",
-                "cfr",
-                "-force_key_frames",
-                "expr:gte(t,0)",
-                "-avoid_negative_ts",
-                "make_zero",
-                "-start_at_zero",
+                "-fflags", "+genpts",                     # ✅ regenerate timestamps
+                "-ss", str(clip_start),
+                "-i", clip_path,
+                "-frames:v", str(frame_count),            # ✅ exact frame count
+                "-c:v", VIDEO_ENCODER,
+                "-pix_fmt", "yuv420p",
+                "-r", str(SEGMENT_FPS),
+                "-vsync", "cfr",
+                "-video_track_timescale", "90000",
+                "-avoid_negative_ts", "make_zero",
                 "-an",
                 "-y",
                 segment_output,
             ]
-            if VIDEO_ENCODER == "libx264":
-                segment_cmd.extend(["-preset", "medium", "-crf", "23"])
-            else:
-                segment_cmd.extend(["-b:v", "6M", "-maxrate", "8M", "-bufsize", "12M"])
 
-            _run_ffmpeg(segment_cmd, step_name=f"segment_{i} (encode extract)")
-        
-        # Ensure segment was written and has content (catches silent ffmpeg failures)
+        # Encoder settings
+        if VIDEO_ENCODER == "libx264":
+            segment_cmd.extend(["-preset", "medium", "-crf", "23"])
+        else:
+            segment_cmd.extend(["-b:v", "6M", "-maxrate", "8M", "-bufsize", "12M"])
+
+        _run_ffmpeg(segment_cmd, step_name=f"segment_{i}")
+
+        # Validate output
         if not os.path.exists(segment_output) or os.path.getsize(segment_output) < 1000:
             raise RuntimeError(f"Segment {i} produced invalid file: {segment_output}")
-        
+
         abs_seg = os.path.abspath(segment_output)
         safe_seg = abs_seg.replace("'", "'\\''")
         concat_list.append(f"file '{safe_seg}'")
         segment_files.append(segment_output)
-        
+
         if (i + 1) % 5 == 0:
             print(f"   Created {i+1}/{len(segment_specs)} segments")
-    
+
     print(f"\nConcatenating {len(segment_files)} segments...")
     
     concat_file = os.path.join(temp_folder, "concat.txt")
@@ -588,8 +569,14 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
     
     temp_video = os.path.join(temp_folder, "video_no_audio.mp4")
     _run_ffmpeg([
-        'ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_file,
-        '-c', 'copy', '-y', temp_video
+        'ffmpeg',
+        '-fflags', '+genpts',
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', concat_file,
+        '-c', 'copy',
+        '-y',
+        temp_video
     ], step_name="concat segments")
 
     # Single final encode (GPU when available) to:
@@ -598,6 +585,7 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
     encoded_video = os.path.join(temp_folder, "video_encoded.mp4")
     final_encode_cmd = [
         "ffmpeg",
+        "-fflags", "+genpts",
         "-i",
         temp_video,
         "-t",

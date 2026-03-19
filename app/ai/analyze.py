@@ -18,6 +18,10 @@ CALIBRATION_JSON = "calibration.json"
 
 MAX_DURATION = int(os.environ.get('MAX_DURATION', '60'))
 
+# tap_mode can be overridden per-request via env var (set by backend before subprocess call).
+# Falls back to options.json value. Values: 'verbatim' | 'calibrate' | '' (AI only)
+TAP_MODE_OVERRIDE = os.environ.get('TAP_MODE', None)  # '' means AI-only, None means use options.json
+
 DENSITY_PRESETS = {
     'low':    {'min_distance': 1.0,  'score_threshold': 70,  'max_cuts': 30},
     'medium': {'min_distance': 0.5,  'score_threshold': 50,  'max_cuts': 60},
@@ -539,6 +543,11 @@ def main():
         except Exception as e:
             print(f"⚠️  options.json error: {e} — using defaults")
 
+    # Per-request override beats options.json (set by backend via TAP_MODE env var).
+    if TAP_MODE_OVERRIDE is not None:
+        tap_mode = TAP_MODE_OVERRIDE if TAP_MODE_OVERRIDE != '' else None
+        print(f"🔧 TAP_MODE env override: {tap_mode!r}")
+
     first_song = target_song if target_song and target_song in audio_files else audio_files[0]
     if target_song and target_song not in audio_files:
         print(f"⚠️  '{target_song}' not found, using '{first_song}'")
@@ -550,6 +559,12 @@ def main():
     if os.path.exists(output_json_abs):
         with open(output_json_abs) as f:
             existing = json.load(f)
+
+    # Delete stale analyze_result.json so the backend is forced to serve fresh results.
+    analyze_result_path = os.path.join(project_root, "backend", "uploads", "analyze_result.json")
+    if os.path.exists(analyze_result_path):
+        os.remove(analyze_result_path)
+        print(f"🗑️  Cleared stale analyze_result.json")
 
     try:
         analysis = analyze_audio_advanced(

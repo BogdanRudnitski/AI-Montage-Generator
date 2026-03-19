@@ -479,6 +479,21 @@ def _write_json_atomic(path: Path, data) -> None:
     os.replace(tmp_name, path)
 
 
+def _materialize_song_taps_file(song_filename: str, taps_entry: dict) -> None:
+    """Write per-song taps files used by analyze.py/calibrate.py from shared taps.json entry."""
+    taps_dir = Path("uploads/taps")
+    taps_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(song_filename).stem
+    payload = {
+        "song": song_filename,
+        "recorded_at": taps_entry.get("recorded_at"),
+        "cut_count": int(taps_entry.get("cut_count", len(taps_entry.get("manual_cuts") or []))),
+        "manual_cuts": taps_entry.get("manual_cuts") or [],
+    }
+    _write_json_atomic(taps_dir / f"{song_filename}.json", payload)
+    _write_json_atomic(taps_dir / f"{stem}.json", payload)
+
+
 @app.post("/api/taps/save")
 async def save_taps(body: dict = Body(...)):
     try:
@@ -494,6 +509,8 @@ async def save_taps(body: dict = Body(...)):
             "manual_cuts": manual_cuts,
         }
         _write_json_atomic(TAPS_FILE, taps_data)
+        # Keep per-song tap file in sync so analyze verbatim never reads stale data.
+        _materialize_song_taps_file(song_filename, taps_data[song_filename])
         return {"success": True, "cut_count": len(manual_cuts)}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -544,18 +561,7 @@ async def run_calibrate(body: dict = Body(...)):
                     break
         if entry is None:
             return {"success": False, "error": f"No taps found for song '{song_filename}'"}
-        taps_dir = Path("uploads/taps")
-        taps_dir.mkdir(parents=True, exist_ok=True)
-        # Write both exact-name and stem-name files for compatibility with calibrate.py expectations.
-        stem = Path(song_filename).stem
-        per_song_payload = {
-            "song": song_filename,
-            "recorded_at": entry.get("recorded_at"),
-            "cut_count": int(entry.get("cut_count", len(entry.get("manual_cuts") or []))),
-            "manual_cuts": entry.get("manual_cuts") or [],
-        }
-        _write_json_atomic(taps_dir / f"{song_filename}.json", per_song_payload)
-        _write_json_atomic(taps_dir / f"{stem}.json", per_song_payload)
+        _materialize_song_taps_file(song_filename, entry)
         proc = subprocess.run(
             [str(AI_VENV_PYTHON), str(CALIBRATE_SCRIPT), song_filename],
             cwd=str(AI_DIR),
@@ -642,6 +648,25 @@ async def analyze_only(body: Optional[dict] = Body(None)):
         max_duration = int(options.get("max_duration", 60))
         env = os.environ.copy()
         env["MAX_DURATION"] = str(max_duration)
+        # Prefer request tap_mode over options.json to avoid stale mode.
+        requested_tap_mode = (body or {}).get("tap_mode", None)
+        if requested_tap_mode in ("verbatim", "calibrate"):
+            env["TAP_MODE"] = requested_tap_mode
+        else:
+            env["TAP_MODE"] = ""
+        # Ensure per-song tap files are fresh before running analyze.py.
+        song_for_taps = options.get("song_filename")
+        if song_for_taps:
+            taps_data = _read_json_file(TAPS_FILE, {})
+            taps_entry = taps_data.get(song_for_taps)
+            if taps_entry is None:
+                target = unquote(str(song_for_taps)).strip().lower()
+                for k, v in taps_data.items():
+                    if unquote(str(k)).strip().lower() == target:
+                        taps_entry = v
+                        break
+            if taps_entry is not None:
+                _materialize_song_taps_file(song_for_taps, taps_entry)
         # 1) Run analyze.py
         print("[TRACE] running analyze.py (cwd=%s) ..." % AI_DIR)
         proc = subprocess.run(

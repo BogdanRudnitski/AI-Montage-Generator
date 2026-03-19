@@ -444,7 +444,9 @@ export default function ExploreScreen() {
     }
     setGenerateLoading(true);
     try {
-      const body = song?.name ? { song_filename: song.name } : {};
+      const body: Record<string, unknown> = song?.name ? { song_filename: song.name } : {};
+      // Send tap_mode explicitly so the backend never reads a stale options.json value.
+      body.tap_mode = tapMode ?? null;
       console.log("[TRACE] createPreview: sending POST /analyze", {
         currentSongName: song?.name,
         currentSongUri: song?.uri,
