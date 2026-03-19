@@ -337,9 +337,6 @@ def compute_segments_only(cut_points, duration, clip_manager, max_duration=None,
         end_time = timestamps[i + 1]['timestamp']
         segment_duration = end_time - start_time
         # Enforce min clip duration (match frontend; avoid zero-length)
-        if segment_duration < min_clip_duration:
-            segment_duration = min_clip_duration
-            end_time = start_time + segment_duration
         current_point = timestamps[i + 1]
         force_new_clip = current_point['type'] in BEAT_CHANGE_TYPES and current_point.get('score', 0) >= 20
         segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=force_new_clip)
@@ -459,9 +456,6 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
             start_time = timestamps[i]['timestamp']
             end_time = timestamps[i + 1]['timestamp']
             segment_duration = end_time - start_time
-            if segment_duration < min_clip_duration:
-                segment_duration = min_clip_duration
-                end_time = start_time + segment_duration
             current_point = timestamps[i + 1]
             force_new_clip = current_point['type'] in BEAT_CHANGE_TYPES and current_point.get('score', 0) >= 20
             segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=force_new_clip)
@@ -544,10 +538,10 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
             # No portrait scaling here; scaling happens exactly once during the final export encode.
             segment_cmd = [
                 "ffmpeg",
-                "-ss",
-                str(clip_start),
                 "-i",
                 clip_path,
+                "-ss",
+                str(clip_start),
                 "-t",
                 str(segment_duration),
                 "-c:v",
@@ -562,6 +556,7 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
                 "expr:gte(t,0)",
                 "-avoid_negative_ts",
                 "make_zero",
+                "-start_at_zero",
                 "-an",
                 "-y",
                 segment_output,

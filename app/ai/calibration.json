@@ -1,0 +1,107 @@
+{
+  "songs": {
+    "Starships": {
+      "type_bonuses": {
+        "drum_low": 15,
+        "pattern_change": -15,
+        "unknown": -15,
+        "vocal_repetition": 15,
+        "vocal_transient": 0
+      },
+      "min_distance": 0.25,
+      "score_threshold": 65.0,
+      "density_profile": [
+        {
+          "start": 0.0,
+          "end": 5.0,
+          "target_cuts": 1,
+          "weight": 0.111
+        },
+        {
+          "start": 5.0,
+          "end": 10.0,
+          "target_cuts": 3,
+          "weight": 0.333
+        },
+        {
+          "start": 10.0,
+          "end": 15.0,
+          "target_cuts": 3,
+          "weight": 0.333
+        },
+        {
+          "start": 15.0,
+          "end": 20.0,
+          "target_cuts": 9,
+          "weight": 1.0
+        },
+        {
+          "start": 20.0,
+          "end": 25.0,
+          "target_cuts": 5,
+          "weight": 0.556
+        },
+        {
+          "start": 25.0,
+          "end": 30.0,
+          "target_cuts": 2,
+          "weight": 0.222
+        },
+        {
+          "start": 30.0,
+          "end": 35.0,
+          "target_cuts": 3,
+          "weight": 0.333
+        },
+        {
+          "start": 35.0,
+          "end": 40.0,
+          "target_cuts": 3,
+          "weight": 0.333
+        },
+        {
+          "start": 40.0,
+          "end": 45.0,
+          "target_cuts": 6,
+          "weight": 0.667
+        },
+        {
+          "start": 45.0,
+          "end": 50.0,
+          "target_cuts": 7,
+          "weight": 0.778
+        },
+        {
+          "start": 50.0,
+          "end": 55.0,
+          "target_cuts": 5,
+          "weight": 0.556
+        },
+        {
+          "start": 55.0,
+          "end": 60.0,
+          "target_cuts": 7,
+          "weight": 0.778
+        }
+      ],
+      "stats": {
+        "manual_cuts": 54,
+        "matched": 19,
+        "false_positives": 37,
+        "fully_missed": 35,
+        "p10_gap": 0.291,
+        "avg_gap": 1.061
+      }
+    }
+  },
+  "type_bonuses": {
+    "drum_low": 15.0,
+    "pattern_change": -15.0,
+    "unknown": -15.0,
+    "vocal_repetition": 15.0,
+    "vocal_transient": 0.0
+  },
+  "min_distance": 0.25,
+  "score_threshold": 65.0,
+  "songs_calibrated": 1
+}

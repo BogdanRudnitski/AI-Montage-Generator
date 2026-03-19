@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Video, ResizeMode } from "expo-av";
 import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, StyleSheet, Dimensions, Switch, Modal, FlatList, TextInput, KeyboardAvoidingView, Platform } from "react-native";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import Slider from '@react-native-community/slider';
 import { SERVER_URL } from "../config";
@@ -76,8 +76,13 @@ export default function ExploreScreen() {
   const [focusBass, setFocusBass] = useState(true);
   const [focusVocals, setFocusVocals] = useState(true);
   const [focusRepetitions, setFocusRepetitions] = useState(true);
-  const [density, setDensity] = useState<'low' | 'medium' | 'high' | 'insane'>('medium');
+  const [density, setDensity] = useState<'low' | 'medium' | 'high'>('medium');
   const [aggressiveness, setAggressiveness] = useState(0.7);
+  const [tapMode, setTapMode] = useState<null | "verbatim" | "calibrate">(null);
+  const [songTapCount, setSongTapCount] = useState<number>(0);
+  const [calibrating, setCalibrating] = useState(false);
+  const [calibrationDone, setCalibrationDone] = useState(false);
+  const calibrationSentForSongRef = useRef<string | null>(null);
 
   const [showMusicModal, setShowMusicModal] = useState(false);
   const [savedTracks, setSavedTracks] = useState<SavedTrack[]>([]);
@@ -346,6 +351,20 @@ export default function ExploreScreen() {
     setSavedTracks(tracks);
   }
 
+  const fetchSongTapCount = useCallback(async () => {
+    if (!song) {
+      setSongTapCount(0);
+      return;
+    }
+    try {
+      const res = await fetch(`${SERVER_URL}/api/taps/${encodeURIComponent(song.name)}`);
+      const data = await res.json();
+      setSongTapCount(data.manual_cuts?.length ?? 0);
+    } catch {
+      setSongTapCount(0);
+    }
+  }, [song]);
+
   // Auto-upload song when settings change
   useEffect(() => {
     if (uiLocked) return;
@@ -358,6 +377,49 @@ export default function ExploreScreen() {
     if (showMusicModal) loadMusicLibrary();
   }, [showMusicModal]);
 
+  useEffect(() => {
+    fetchSongTapCount();
+  }, [fetchSongTapCount]);
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchSongTapCount();
+    }, [fetchSongTapCount])
+  );
+
+  useEffect(() => {
+    const persistTapMode = async () => {
+      try {
+        await fetch(`${SERVER_URL}/api/options`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tap_mode: tapMode }),
+        });
+      } catch {
+        // Keep UI responsive even if backend write fails.
+      }
+    };
+    persistTapMode();
+  }, [tapMode]);
+
+  useEffect(() => {
+    if (tapMode !== "calibrate") return;
+    if (!song || songTapCount < 1) return;
+    if (calibrationSentForSongRef.current === song.name) return;
+    calibrationSentForSongRef.current = song.name;
+    runCalibration();
+  }, [tapMode, song, songTapCount]);
+
+  useEffect(() => {
+    if (!song) {
+      calibrationSentForSongRef.current = null;
+      return;
+    }
+    if (tapMode !== "calibrate") {
+      calibrationSentForSongRef.current = null;
+    }
+  }, [tapMode, song?.name]);
+
   // Invalidate previous analysis when the user selects a different song (avoid showing Enya cuts for Kesha)
   useEffect(() => {
     // song changed
@@ -365,6 +427,21 @@ export default function ExploreScreen() {
   }, [song?.uri]);
 
   async function createPreview() {
+    if ((tapMode === "verbatim" || tapMode === "calibrate") && songTapCount < 1 && song) {
+      Alert.alert(
+        "No taps recorded",
+        "Record taps for this song first, or switch to AI Analysis.",
+        [
+          {
+            text: "Record now",
+            onPress: () =>
+              router.push({ pathname: "/tap-recorder", params: { songName: song.name, songUri: song.uri } }),
+          },
+          { text: "Cancel", style: "cancel" },
+        ]
+      );
+      return;
+    }
     setGenerateLoading(true);
     try {
       const body = song?.name ? { song_filename: song.name } : {};
@@ -520,8 +597,31 @@ export default function ExploreScreen() {
     low: { label: "Low", desc: "~30 cuts" },
     medium: { label: "Medium", desc: "~60 cuts" },
     high: { label: "High", desc: "~90 cuts" },
-    insane: { label: "Insane", desc: "~150 cuts" },
   };
+
+  async function runCalibration() {
+    if (!song || calibrating) return;
+    setCalibrating(true);
+    setCalibrationDone(false);
+    try {
+      const res = await fetch(`${SERVER_URL}/api/calibrate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ song_filename: song.name }),
+      });
+      const data = await res.json();
+      if (!data.success) {
+        Alert.alert("Calibration failed", data.error || "Unknown error");
+        return;
+      }
+      setCalibrationDone(true);
+      Alert.alert("Calibration complete", "Tap-driven calibration finished.");
+    } catch {
+      Alert.alert("Calibration failed", "Please try again.");
+    } finally {
+      setCalibrating(false);
+    }
+  }
 
   return (
     <View style={styles.container}>
@@ -826,6 +926,282 @@ export default function ExploreScreen() {
           </Modal>
         </View>
 
+        {song && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <View style={styles.sectionTitleRow}>
+                <View style={styles.sectionIconBg}>
+                  <Ionicons name="finger-print" size={22} color="#6366f1" />
+                </View>
+                <View>
+                  <Text style={styles.sectionTitle}>Cut Mode</Text>
+                  <Text style={styles.sectionSubtitle}>How to detect cuts</Text>
+                </View>
+              </View>
+            </View>
+
+            <TouchableOpacity
+              style={[styles.recordTapsButton, songTapCount > 0 ? styles.recordTapsButtonRerecord : styles.recordTapsButtonRecord]}
+              onPress={() => router.push({ pathname: "/tap-recorder", params: { songName: song.name, songUri: song.uri } })}
+              activeOpacity={0.8}
+              disabled={uiLocked}
+            >
+              <Ionicons
+                name={songTapCount > 0 ? "refresh-circle" : "add-circle"}
+                size={20}
+                color={songTapCount > 0 ? "#334155" : "#fff"}
+              />
+              <Text style={[styles.recordTapsButtonText, songTapCount > 0 && styles.recordTapsButtonTextRerecord]}>
+                {songTapCount > 0 ? `View taps (${songTapCount})` : "Record taps"}
+              </Text>
+            </TouchableOpacity>
+
+            <View style={styles.modeStack}>
+              <TouchableOpacity
+                activeOpacity={0.8}
+                style={[
+                  styles.modeCard,
+                  tapMode === "verbatim" && styles.modeCardSelected,
+                  songTapCount < 1 && styles.modeCardDisabled,
+                ]}
+                onPress={() => setTapMode("verbatim")}
+                disabled={songTapCount < 1}
+              >
+                <View style={styles.modeCardLeft}>
+                  <Ionicons name="hand-left-outline" size={22} color={songTapCount < 1 ? "#94a3b8" : "#6366f1"} />
+                  <View style={styles.modeTextWrap}>
+                    <Text style={[styles.modeTitle, songTapCount < 1 && styles.modeTextDisabled]}>Use My Taps</Text>
+                    <Text style={[styles.modeSubtitle, songTapCount < 1 && styles.modeTextDisabled]}>
+                      {songTapCount < 1 ? "Record taps first for this song" : "Use exactly where I tapped"}
+                    </Text>
+                  </View>
+                </View>
+                <Ionicons name={tapMode === "verbatim" ? "radio-button-on" : "radio-button-off"} size={20} color={songTapCount < 1 ? "#94a3b8" : "#6366f1"} />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                activeOpacity={0.8}
+                style={[
+                  styles.modeCard,
+                  tapMode === "calibrate" && styles.modeCardSelected,
+                  songTapCount < 1 && styles.modeCardDisabled,
+                ]}
+                onPress={() => setTapMode("calibrate")}
+                disabled={songTapCount < 1}
+              >
+                <View style={styles.modeCardLeft}>
+                  <Ionicons name="locate-outline" size={22} color={songTapCount < 1 ? "#94a3b8" : "#6366f1"} />
+                  <View style={styles.modeTextWrap}>
+                    <Text style={[styles.modeTitle, songTapCount < 1 && styles.modeTextDisabled]}>Calibrate AI</Text>
+                    <Text style={[styles.modeSubtitle, songTapCount < 1 && styles.modeTextDisabled]}>
+                      {songTapCount < 1
+                        ? "Record taps first for this song"
+                        : calibrating
+                        ? "Calibrating now..."
+                        : calibrationDone
+                        ? "Calibration complete"
+                        : "Train AI from my taps"}
+                    </Text>
+                  </View>
+                </View>
+                {calibrating ? (
+                  <ActivityIndicator size="small" color="#6366f1" />
+                ) : (
+                  <Ionicons name={tapMode === "calibrate" ? "radio-button-on" : "radio-button-off"} size={20} color={songTapCount < 1 ? "#94a3b8" : "#6366f1"} />
+                )}
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                activeOpacity={0.8}
+                style={[
+                  styles.modeCard,
+                  tapMode === null && styles.modeCardSelected,
+                ]}
+                onPress={() => setTapMode(null)}
+              >
+                <View style={styles.modeCardLeft}>
+                  <Ionicons name="hardware-chip-outline" size={22} color="#6366f1" />
+                  <View style={styles.modeTextWrap}>
+                    <Text style={styles.modeTitle}>AI Analysis</Text>
+                    <Text style={styles.modeSubtitle}>Let the AI detect cut points</Text>
+                  </View>
+                </View>
+                <Ionicons name={tapMode === null ? "radio-button-on" : "radio-button-off"} size={20} color="#6366f1" />
+              </TouchableOpacity>
+            </View>
+
+            {(tapMode === null || tapMode === "calibrate") && (
+              <View style={styles.inlineAdvancedWrap}>
+                <TouchableOpacity
+                  style={styles.advancedToggle}
+                  disabled={uiLocked}
+                  onPress={() => {
+                    if (uiLocked) return;
+                    setShowAdvanced(!showAdvanced);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.advancedToggleLeft}>
+                    <Ionicons name="options-outline" size={22} color="#6366f1" />
+                    <Text style={styles.advancedToggleText}>Advanced Options</Text>
+                  </View>
+                  <Ionicons name={showAdvanced ? "chevron-up" : "chevron-down"} size={24} color="#94a3b8" />
+                </TouchableOpacity>
+
+                {showAdvanced && (
+                  <View style={styles.advancedContent}>
+                    <Text style={styles.advancedDescription}>Fine-tune how analysis works and generates cuts</Text>
+                    <View style={styles.densitySection}>
+                      <View style={styles.densityHeader}>
+                        <Text style={styles.densityTitle}>Cut Density</Text>
+                        <View style={styles.densityBadge}>
+                          <Text style={styles.densityBadgeText}>{densityLabels[density].label}</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.densityDescription}>{densityLabels[density].desc} for {duration}s video</Text>
+                      <View style={styles.densityGrid}>
+                        {(Object.keys(densityLabels) as Array<keyof typeof densityLabels>).map((key) => (
+                          <TouchableOpacity
+                            key={key}
+                            style={[styles.densityOption, density === key && styles.densityOptionActive]}
+                            disabled={uiLocked}
+                            onPress={() => {
+                              if (uiLocked) return;
+                              setDensity(key);
+                              setSongUploaded(false);
+                            }}
+                            activeOpacity={0.7}
+                          >
+                            <Text style={[styles.densityLabel, density === key && styles.densityLabelActive]}>{densityLabels[key].label}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </View>
+
+                    <View style={styles.sliderSection}>
+                      <View style={styles.sliderHeader}>
+                        <Text style={styles.sliderTitle}>Aggressiveness</Text>
+                        <View style={styles.sliderValueBadge}>
+                          <Text style={styles.sliderValueText}>{Math.round(aggressiveness * 100)}%</Text>
+                        </View>
+                      </View>
+                      <Text style={styles.sliderDescription}>Higher = more cuts on subtle beats</Text>
+                      <View style={styles.sliderContainer}>
+                        <Slider
+                          style={styles.slider}
+                          minimumValue={0}
+                          maximumValue={1}
+                          step={0.1}
+                          value={aggressiveness}
+                          disabled={uiLocked}
+                          onValueChange={(value) => {
+                            if (uiLocked) return;
+                            setAggressiveness(value);
+                            setSongUploaded(false);
+                          }}
+                          minimumTrackTintColor="#6366f1"
+                          maximumTrackTintColor="#e2e8f0"
+                          thumbTintColor="#6366f1"
+                        />
+                      </View>
+                    </View>
+
+                    <View style={styles.focusSection}>
+                      <Text style={styles.focusTitle}>Detection Focus</Text>
+                      <View style={styles.optionRow}>
+                        <View style={styles.optionLeft}>
+                          <View>
+                            <Text style={styles.optionTitle}>Bass Drops</Text>
+                            <Text style={styles.optionDescription}>Heavy bass & drops</Text>
+                          </View>
+                        </View>
+                        <Switch
+                          value={focusBass}
+                          disabled={uiLocked}
+                          onValueChange={(val) => {
+                            if (uiLocked) return;
+                            setFocusBass(val);
+                            setSongUploaded(false);
+                          }}
+                          trackColor={{ false: "#e2e8f0", true: "#6366f1" }}
+                          thumbColor={focusBass ? "#fff" : "#cbd5e1"}
+                        />
+                      </View>
+
+                      <View style={styles.optionRow}>
+                        <View style={styles.optionLeft}>
+                          <View>
+                            <Text style={styles.optionTitle}>Vocal Hits</Text>
+                            <Text style={styles.optionDescription}>Consonants & syllables</Text>
+                          </View>
+                        </View>
+                        <Switch
+                          value={focusVocals}
+                          disabled={uiLocked}
+                          onValueChange={(val) => {
+                            if (uiLocked) return;
+                            setFocusVocals(val);
+                            setSongUploaded(false);
+                          }}
+                          trackColor={{ false: "#e2e8f0", true: "#6366f1" }}
+                          thumbColor={focusVocals ? "#fff" : "#cbd5e1"}
+                        />
+                      </View>
+
+                      <View style={styles.optionRow}>
+                        <View style={styles.optionLeft}>
+                          <View>
+                            <Text style={styles.optionTitle}>Repetitions</Text>
+                            <Text style={styles.optionDescription}>Repeated words/sounds</Text>
+                          </View>
+                        </View>
+                        <Switch
+                          value={focusRepetitions}
+                          disabled={uiLocked}
+                          onValueChange={(val) => {
+                            if (uiLocked) return;
+                            setFocusRepetitions(val);
+                            setSongUploaded(false);
+                          }}
+                          trackColor={{ false: "#e2e8f0", true: "#6366f1" }}
+                          thumbColor={focusRepetitions ? "#fff" : "#cbd5e1"}
+                        />
+                      </View>
+                    </View>
+
+                    <View style={styles.optionRow}>
+                      <View style={styles.optionLeft}>
+                        <View>
+                          <Text style={styles.optionTitle}>Sync to Beat Grid</Text>
+                          <Text style={styles.optionDescription}>Snap cuts to nearest beat</Text>
+                        </View>
+                      </View>
+                      <Switch
+                        value={syncToGrid}
+                        disabled={uiLocked}
+                        onValueChange={(val) => {
+                          if (uiLocked) return;
+                          setSyncToGrid(val);
+                          setSongUploaded(false);
+                        }}
+                        trackColor={{ false: "#e2e8f0", true: "#6366f1" }}
+                        thumbColor={syncToGrid ? "#fff" : "#cbd5e1"}
+                      />
+                    </View>
+
+                    <View style={styles.advancedHint}>
+                      <Ionicons name="information-circle" size={16} color="#6366f1" />
+                      <Text style={styles.advancedHintText}>
+                        Tip: Start with Medium density and 70% aggressiveness, then adjust to taste
+                      </Text>
+                    </View>
+                  </View>
+                )}
+              </View>
+            )}
+          </View>
+        )}
+
         {/* Duration Section */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
@@ -867,234 +1243,7 @@ export default function ExploreScreen() {
           </View>
         </View>
 
-        {/* Advanced Options Section */}
-        <View style={styles.section}>
-          <TouchableOpacity
-            style={styles.advancedToggle}
-            disabled={uiLocked}
-            onPress={() => {
-              if (uiLocked) return;
-              setShowAdvanced(!showAdvanced);
-            }}
-            activeOpacity={0.7}
-          >
-            <View style={styles.advancedToggleLeft}>
-              <Ionicons 
-                name="options-outline" 
-                size={22} 
-                color="#6366f1" 
-              />
-              <Text style={styles.advancedToggleText}>Advanced Options</Text>
-            </View>
-            <Ionicons 
-              name={showAdvanced ? "chevron-up" : "chevron-down"} 
-              size={24} 
-              color="#94a3b8" 
-            />
-          </TouchableOpacity>
-
-          {showAdvanced && (
-            <View style={styles.advancedContent}>
-              <Text style={styles.advancedDescription}>
-                Fine-tune how analysis works and generates cuts
-              </Text>
-
-              {/* Density Selector */}
-              <View style={styles.densitySection}>
-                <View style={styles.densityHeader}>
-                  <Text style={styles.densityTitle}>Cut Density</Text>
-                  <View style={styles.densityBadge}>
-                    <Text style={styles.densityBadgeText}>
-                      {densityLabels[density].label}
-                    </Text>
-                  </View>
-                </View>
-                <Text style={styles.densityDescription}>
-                  {densityLabels[density].desc} for {duration}s video
-                </Text>
-                
-                <View style={styles.densityGrid}>
-                  {(Object.keys(densityLabels) as Array<keyof typeof densityLabels>).map((key) => (
-                    <TouchableOpacity
-                      key={key}
-                      style={[
-                        styles.densityOption,
-                        density === key && styles.densityOptionActive
-                      ]}
-                      disabled={uiLocked}
-                      onPress={() => {
-                        if (uiLocked) return;
-                        setDensity(key);
-                        setSongUploaded(false);
-                      }}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={[
-                        styles.densityLabel,
-                        density === key && styles.densityLabelActive
-                      ]}>
-                        {densityLabels[key].label}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </View>
-
-              {/* Aggressiveness Slider */}
-              <View style={styles.sliderSection}>
-                <View style={styles.sliderHeader}>
-                  <Text style={styles.sliderTitle}>Aggressiveness</Text>
-                  <View style={styles.sliderValueBadge}>
-                    <Text style={styles.sliderValueText}>
-                      {Math.round(aggressiveness * 100)}%
-                    </Text>
-                  </View>
-                </View>
-                <Text style={styles.sliderDescription}>
-                  Higher = more cuts on subtle beats
-                </Text>
-                
-                <View style={styles.sliderContainer}>
-                  <Slider
-                    style={styles.slider}
-                    minimumValue={0}
-                    maximumValue={1}
-                    step={0.1}
-                    value={aggressiveness}
-                    disabled={uiLocked}
-                    onValueChange={(value) => {
-                      if (uiLocked) return;
-                      setAggressiveness(value);
-                      setSongUploaded(false);
-                    }}
-                    minimumTrackTintColor="#6366f1"
-                    maximumTrackTintColor="#e2e8f0"
-                    thumbTintColor="#6366f1"
-                  />
-                </View>
-              </View>
-
-              {/* Focus Toggles */}
-              <View style={styles.focusSection}>
-                <Text style={styles.focusTitle}>Detection Focus</Text>
-                
-                <View style={styles.optionRow}>
-                  <View style={styles.optionLeft}>
-                    <View>
-                      <Text style={styles.optionTitle}>Bass Drops</Text>
-                      <Text style={styles.optionDescription}>Heavy bass & drops</Text>
-                    </View>
-                  </View>
-                  <Switch
-                    value={focusBass}
-                    disabled={uiLocked}
-                    onValueChange={(val) => {
-                      if (uiLocked) return;
-                      setFocusBass(val);
-                      setSongUploaded(false);
-                    }}
-                    trackColor={{ false: "#e2e8f0", true: "#6366f1" }}
-                    thumbColor={focusBass ? "#fff" : "#cbd5e1"}
-                  />
-                </View>
-
-                <View style={styles.optionRow}>
-                  <View style={styles.optionLeft}>
-                    <View>
-                      <Text style={styles.optionTitle}>Vocal Hits</Text>
-                      <Text style={styles.optionDescription}>Consonants & syllables</Text>
-                    </View>
-                  </View>
-                  <Switch
-                    value={focusVocals}
-                    disabled={uiLocked}
-                    onValueChange={(val) => {
-                      if (uiLocked) return;
-                      setFocusVocals(val);
-                      setSongUploaded(false);
-                    }}
-                    trackColor={{ false: "#e2e8f0", true: "#6366f1" }}
-                    thumbColor={focusVocals ? "#fff" : "#cbd5e1"}
-                  />
-                </View>
-
-                <View style={styles.optionRow}>
-                  <View style={styles.optionLeft}>
-                    <View>
-                      <Text style={styles.optionTitle}>Repetitions</Text>
-                      <Text style={styles.optionDescription}>Repeated words/sounds</Text>
-                    </View>
-                  </View>
-                  <Switch
-                    value={focusRepetitions}
-                    disabled={uiLocked}
-                    onValueChange={(val) => {
-                      if (uiLocked) return;
-                      setFocusRepetitions(val);
-                      setSongUploaded(false);
-                    }}
-                    trackColor={{ false: "#e2e8f0", true: "#6366f1" }}
-                    thumbColor={focusRepetitions ? "#fff" : "#cbd5e1"}
-                  />
-                </View>
-              </View>
-
-              <View style={styles.optionRow}>
-                <View style={styles.optionLeft}>
-                  <View>
-                    <Text style={styles.optionTitle}>Sync to Beat Grid</Text>
-                    <Text style={styles.optionDescription}>Snap cuts to nearest beat</Text>
-                  </View>
-                </View>
-                <Switch
-                  value={syncToGrid}
-                  disabled={uiLocked}
-                  onValueChange={(val) => {
-                    if (uiLocked) return;
-                    setSyncToGrid(val);
-                    setSongUploaded(false);
-                  }}
-                  trackColor={{ false: "#e2e8f0", true: "#6366f1" }}
-                  thumbColor={syncToGrid ? "#fff" : "#cbd5e1"}
-                />
-              </View>
-
-              <View style={styles.advancedHint}>
-                <Ionicons name="information-circle" size={16} color="#6366f1" />
-                <Text style={styles.advancedHintText}>
-                  Tip: Start with Medium density and 70% aggressiveness, then adjust to taste
-                </Text>
-              </View>
-              {DEMO_ENABLED && (
-              <View style={styles.hiddenDemoRow}>
-                <TouchableOpacity
-                  style={[
-                    styles.hiddenDemoButton,
-                    mediaList.filter((m) => m.type === "video").length === 0 && styles.buttonDisabled,
-                  ]}
-                  onPress={openDecoyPreview}
-                  activeOpacity={0.8}
-                    disabled={uiLocked || mediaList.filter((m) => m.type === "video").length === 0}
-                >
-                  <Text style={styles.hiddenDemoButtonText}>Preview test</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[
-                    styles.hiddenDemoButton,
-                    { backgroundColor: "#fff", borderColor: "#6366f1" },
-                  ]}
-                  onPress={() => router.push("/timeline-demo")}
-                  activeOpacity={0.8}
-                  disabled={uiLocked}
-                >
-                  <Text style={styles.hiddenDemoButtonText}>Timeline demo</Text>
-                </TouchableOpacity>
-              </View>
-              )}
-            </View>
-          )}
-        </View>
+        
 
         {/* Generate Button */}
         <View style={styles.section}>
@@ -1965,5 +2114,98 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "800",
     color: "#6366f1",
+  },
+  modeStack: {
+    gap: 12,
+  },
+  inlineAdvancedWrap: {
+    marginTop: 12,
+  },
+  recordTapsButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 12,
+    marginBottom: 12,
+  },
+  recordTapsButtonRecord: {
+    backgroundColor: "#6366f1",
+  },
+  recordTapsButtonRerecord: {
+    backgroundColor: "#e2e8f0",
+  },
+  recordTapsButtonText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  recordTapsButtonTextRerecord: {
+    color: "#334155",
+  },
+  modeCard: {
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 2,
+    borderColor: "transparent",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
+    elevation: 4,
+  },
+  modeCardSelected: {
+    borderColor: "#6366f1",
+    backgroundColor: "#f8f8ff",
+  },
+  modeCardLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    flex: 1,
+  },
+  modeCardRight: {
+    marginTop: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  modeTextWrap: {
+    flex: 1,
+  },
+  modeTitle: {
+    color: "#0f172a",
+    fontSize: 16,
+    fontWeight: "700",
+  },
+  modeSubtitle: {
+    color: "#64748b",
+    fontSize: 13,
+    fontWeight: "600",
+    marginTop: 2,
+  },
+  modeCardDisabled: {
+    backgroundColor: "#f1f5f9",
+    borderColor: "#e2e8f0",
+  },
+  modeTextDisabled: {
+    color: "#94a3b8",
+  },
+  modeActionBtn: {
+    borderWidth: 1,
+    borderColor: "#6366f1",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: "#fff",
+    minHeight: 34,
+    justifyContent: "center",
+  },
+  modeActionBtnText: {
+    color: "#6366f1",
+    fontSize: 12,
+    fontWeight: "700",
   },
 });

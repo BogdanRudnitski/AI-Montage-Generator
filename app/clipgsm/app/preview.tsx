@@ -137,6 +137,13 @@ export default function PreviewScreen() {
   const [resizeMode, setResizeMode] = useState<"moveCut" | "trim">("moveCut");
   const timelineScrollRef = useRef<ScrollView>(null);
   const segmentStartTimeRef = useRef(0);
+  // Absolute wall-clock anchor: clockOriginRef = Date.now()/1000 when playheadTime==0.
+  // playheadTime = Date.now()/1000 - clockOriginRef (never pauses for seeks).
+  const clockOriginRef = useRef(0);
+  // When paused, stores the playhead position so we can re-anchor on resume.
+  const pausedAtRef = useRef(0);
+  // Set to true by advanceTo commit; cleared by the segment-sync effect so it skips one run.
+  const advanceJustCommittedRef = useRef(false);
   const soundRef = useRef<Audio.Sound | null>(null);
   const hasRedirected = useRef(false);
   const currentIndexRef = useRef(0);
@@ -906,6 +913,8 @@ export default function PreviewScreen() {
     } else {
       timelineTimeRef.current = timelineTime;
       setPlayheadTime(timelineTime);
+      // Re-anchor continuous clock to scrubbed position.
+      clockOriginRef.current = Date.now() / 1000 - timelineTime;
       soundRef.current?.setPositionAsync(timelineTime * 1000).catch(() => {});
     }
 
@@ -932,6 +941,7 @@ export default function PreviewScreen() {
     const info = getSegmentAtTime(time);
     if (!info) return;
     timelineTimeRef.current = time;
+    clockOriginRef.current = Date.now() / 1000 - time;
     setPlayheadTime(time);
     const targetIndex = info.segmentIndex;
     const currentIndex = currentIndexRef.current;
@@ -1075,42 +1085,12 @@ export default function PreviewScreen() {
   currentIndexRef.current = currentSegmentIndex;
 
   const advanceTo = (nextIndex: number, options?: { force?: boolean; seekToClipPosition?: number }) => {
-    if (advanceInFlightRef.current) return;
-    advanceInFlightRef.current = true;
     const fromIndex = currentIndexRef.current;
     const list = playListRef.current;
     try {
-      if (nextIndex < 0 || nextIndex >= list.length) {
-        if (nextIndex >= list.length && list.length > 0) {
-          const slot = currentVisibleSlotRef.current;
-          const ref = getMountedVideoRef(slot);
-          if (ref) ref.pauseAsync().catch(() => {});
-          soundRef.current?.pauseAsync().catch(() => {});
-          setPlaybackEnded(true);
-          setIsPlaying(false);
-        }
-        if (__DEV__) debugLog("advanceTo-ignored", { reason: "out-of-range", from: fromIndex, to: nextIndex, listLen: list.length });
-        advanceInFlightRef.current = false;
-        return;
-      }
-      let destinationIndex = nextIndex;
-      if (!options?.force) {
-        if (nextIndex > fromIndex + 1) {
-          destinationIndex = fromIndex + 1;
-          if (__DEV__) debugLog("advanceTo-ignored", { reason: "clamped-to-sequential", from: fromIndex, to: nextIndex, clampedTo: destinationIndex });
-        } else if (nextIndex < fromIndex) {
-          if (__DEV__) debugLog("advanceTo-ignored", { reason: "backward-without-force", from: fromIndex, to: nextIndex });
-          advanceInFlightRef.current = false;
-          return;
-        }
-      }
-      const now = Date.now();
-      if (!options?.force && now - lastAdvanceAtRef.current < ADVANCE_DEBOUNCE_MS) {
-        if (__DEV__) debugLog("advanceTo-ignored", { reason: "debounce", from: fromIndex, to: destinationIndex });
-        advanceInFlightRef.current = false;
-        return;
-      }
-      lastAdvanceAtRef.current = now;
+      if (nextIndex < 0 || nextIndex >= list.length) return;
+      const destinationIndex = nextIndex;
+      if (!options?.force && destinationIndex === fromIndex) return;
       if (__DEV__) debugLog("advanceTo-request", { from: fromIndex, to: destinationIndex, force: options?.force });
 
       const nextSeg = list[destinationIndex];
@@ -1138,95 +1118,47 @@ export default function PreviewScreen() {
         destinationIndex,
       });
 
-      const clearAdvanceInFlight = () => {
-        advanceInFlightRef.current = false;
-      };
+      // ── Commit immediately (sync) — slot switch never blocks the clock. ──
+      visiblePlaybackSlotRef.current = nextVisibleSlot;
+      setVisiblePlaybackSlot(nextVisibleSlot);
+      currentIndexRef.current = destinationIndex;
+      segmentBoundsRef.current = { startTime: nextSeg.startTime, endTime: nextSeg.endTime };
+      segmentStartTimeRef.current = Date.now() / 1000;
+      advanceJustCommittedRef.current = true;
+      setCurrentSegmentIndex(destinationIndex);
+      if (__DEV__) debugLog("advanceTo-commit", { to: destinationIndex });
 
+      // ── Seek + play the new slot in the background — fire and forget. ──
       if (toRef) {
         const token = ++slotSeekTokenRef.current[nextVisibleSlot];
         toRef
-          .setPositionAsync(seekMs, { toleranceMillisBefore: 0, toleranceMillisAfter: 0 })
-          .then(() => toRef.playAsync())
-          .then(() => toRef.pauseAsync())
+          .setPositionAsync(seekMs, { toleranceMillisBefore: 100, toleranceMillisAfter: 100 })
           .then(() => {
-            if (token !== slotSeekTokenRef.current[nextVisibleSlot]) {
-              if (__DEV__) debugLog("seek-token-stale", { slot: nextVisibleSlot, token });
-              clearAdvanceInFlight();
-              return;
-            }
-            visiblePlaybackSlotRef.current = nextVisibleSlot;
-            setVisiblePlaybackSlot(nextVisibleSlot);
-            currentIndexRef.current = destinationIndex;
-            segmentBoundsRef.current = {
-              startTime: nextSeg.startTime,
-              endTime: nextSeg.endTime,
-            };
-            if (!isResizingRef.current) {
-              timelineTimeRef.current = nextSeg.startTime;
-              setPlayheadTime(nextSeg.startTime);
-            }
-            segmentStartTimeRef.current = Date.now() / 1000;
-            setCurrentSegmentIndex(destinationIndex);
-            if (__DEV__) debugLog("advanceTo-commit", { to: destinationIndex });
-            debugLog("advanceTo-sync", {
-              destinationIndex,
-              startTime: nextSeg.startTime,
-              endTime: nextSeg.endTime,
-            });
-            debugLog("segment-enter", {
-              idx: destinationIndex,
-              startTime: nextSeg.startTime,
-              endTime: nextSeg.endTime,
-            });
-
-            const farSlot = (nextVisibleSlot + 2) % 3;
-            const preloadIndex = destinationIndex + 2;
-            const preloadSeg = playListRef.current[preloadIndex];
-            if (preloadSeg?.uri) {
-              const preloadRef = getMountedVideoRef(farSlot);
-              if (preloadRef) {
-                if (__DEV__) debugLog("playback-slot-preload", { farSlot, preloadIndex });
-                const startMs = clampToFileDuration(preloadSeg.uri, preloadSeg.clipStart) * 1000;
-                preloadRef
-                  .setPositionAsync(startMs, { toleranceMillisBefore: 0, toleranceMillisAfter: 0 })
-                  .then(() => preloadRef.playAsync())
-                  .then(() => preloadRef.pauseAsync())
-                  .catch(() => {});
-              } else if (__DEV__) debugLog("slot-ref-null", { slot: farSlot, action: "preload" });
-            }
-            clearAdvanceInFlight();
+            if (token !== slotSeekTokenRef.current[nextVisibleSlot]) return;
+            if (isPlayingRef.current) toRef.playAsync().catch(() => {});
           })
-          .catch((e) => {
-            if (__DEV__) console.warn("[Preview] advanceTo: toRef seek/warm failed", e);
-            visiblePlaybackSlotRef.current = nextVisibleSlot;
-            setVisiblePlaybackSlot(nextVisibleSlot);
-            currentIndexRef.current = destinationIndex;
-            segmentBoundsRef.current = { startTime: nextSeg.startTime, endTime: nextSeg.endTime };
-            if (!isResizingRef.current) {
-              timelineTimeRef.current = nextSeg.startTime;
-              setPlayheadTime(nextSeg.startTime);
-            }
-            segmentStartTimeRef.current = Date.now() / 1000;
-            setCurrentSegmentIndex(destinationIndex);
-            clearAdvanceInFlight();
+          .catch(() => {
+            if (isPlayingRef.current) toRef.playAsync().catch(() => {});
           });
-      } else {
-        if (__DEV__) debugLog("slot-ref-null", { slot: nextVisibleSlot, action: "advanceTo" });
-        visiblePlaybackSlotRef.current = nextVisibleSlot;
-        setVisiblePlaybackSlot(nextVisibleSlot);
-        currentIndexRef.current = destinationIndex;
-        segmentBoundsRef.current = { startTime: nextSeg.startTime, endTime: nextSeg.endTime };
-        if (!isResizingRef.current) {
-          timelineTimeRef.current = nextSeg.startTime;
-          setPlayheadTime(nextSeg.startTime);
+      }
+
+      // ── Pause the previous slot. ──
+      if (fromRef) fromRef.pauseAsync().catch(() => {});
+
+      // ── Seek the far slot (2 ahead) so it's ready. ──
+      const farSlot = (nextVisibleSlot + 2) % 3;
+      const preloadIndex = destinationIndex + 2;
+      const preloadSeg = playListRef.current[preloadIndex];
+      if (preloadSeg?.uri) {
+        const preloadRef = getMountedVideoRef(farSlot);
+        if (preloadRef) {
+          const startMs = clampToFileDuration(preloadSeg.uri, preloadSeg.clipStart) * 1000;
+          const token = ++slotSeekTokenRef.current[farSlot];
+          preloadRef.setPositionAsync(startMs, { toleranceMillisBefore: 200, toleranceMillisAfter: 200 }).catch(() => {});
         }
-        segmentStartTimeRef.current = Date.now() / 1000;
-        setCurrentSegmentIndex(destinationIndex);
-        clearAdvanceInFlight();
       }
     } catch (e) {
       console.error("[Preview] advanceTo crashed", e);
-      advanceInFlightRef.current = false;
     }
   };
 
@@ -1267,25 +1199,8 @@ export default function PreviewScreen() {
           timelineTimeRef.current >= seg.endTime - EPSILON ||
           (!needsLooping && (atClipEnd || atNaturalEnd));
 
-        if (segmentDone && !finishedSegmentsRef.current.has(idx)) {
-          finishedSegmentsRef.current.add(idx);
-          if (__DEV__) debugLog("segment-done", { idx });
-          if (idx + 1 >= list.length) {
-            const slotRef = getMountedVideoRef(slot);
-            if (slotRef) slotRef.pauseAsync().catch(() => {});
-            else if (__DEV__) debugLog("slot-ref-null", { slot, action: "pause-at-end" });
-            soundRef.current?.pauseAsync().catch(() => {});
-            setPlaybackEnded(true);
-            setIsPlaying(false);
-            return;
-          }
-          if (isScrubbingRef.current || isResizingRef.current) {
-            if (__DEV__) debugLog("scrub:advance-blocked-during-interaction", { where: "statusUpdate:segmentDone", idx });
-          } else {
-            advanceTo(idx + 1);
-          }
-          return;
-        }
+        // Segment advance is handled by the continuous clock tick loop.
+        // Status update only handles loop seeks for clips shorter than their segment.
 
         if (seg.segmentDuration <= seg.clipDuration) {
           return;
@@ -1362,33 +1277,44 @@ export default function PreviewScreen() {
 
   function startTimelineClock() {
     if (rafRef.current !== null) return;
-    lastFrameTimeRef.current = performance.now();
 
-    function tick(now: number) {
-      lastFrameTimeRef.current = now;
-
+    function tick() {
       if (isPlayingRef.current && !isScrubbingRef.current && !isResizingRef.current) {
-        const idx = currentIndexRef.current;
         const list = playListRef.current;
-        const seg = list[idx];
-        if (!seg) {
+        const totalDur = totalDurationRef.current;
+        if (list.length === 0 || totalDur <= 0) {
           rafRef.current = requestAnimationFrame(tick);
           return;
         }
-        const elapsed = Date.now() / 1000 - segmentStartTimeRef.current;
-        const t = Math.min(seg.startTime + elapsed, seg.endTime);
+
+        // Continuous wall-clock playhead — never pauses for seeks or slot swaps.
+        const t = Math.min(Date.now() / 1000 - clockOriginRef.current, totalDur);
         timelineTimeRef.current = t;
         setPlayheadTime(t);
-        if (t >= seg.endTime - EPSILON) {
-          if (isScrubbingRef.current || isResizingRef.current) {
-            if (__DEV__) debugLog("scrub:advance-blocked-during-interaction", { where: "tick:autoAdvance", idx });
-          } else {
-            advanceTo(idx + 1);
+
+        // Find which segment we should be in now.
+        const targetIdx = list.findIndex(item => t >= item.startTime - EPSILON && t < item.endTime - EPSILON);
+        const clampedIdx = targetIdx < 0 ? list.length - 1 : targetIdx;
+
+        // If we've crossed into a new segment, fire advanceTo (non-blocking — doesn't stall clock).
+        if (clampedIdx !== currentIndexRef.current && !isScrubbingRef.current && !isResizingRef.current) {
+          advanceTo(clampedIdx, { force: true });
+        }
+
+        // Playback ended
+        if (t >= totalDur - EPSILON) {
+          if (!isScrubbingRef.current && !isResizingRef.current) {
+            const slot = currentVisibleSlotRef.current;
+            getMountedVideoRef(slot)?.pauseAsync().catch(() => {});
+            soundRef.current?.pauseAsync().catch(() => {});
+            setPlaybackEnded(true);
+            setIsPlaying(false);
           }
         }
+
         if (__DEV__ && Date.now() - playheadLogThrottleRef.current > 1000) {
           playheadLogThrottleRef.current = Date.now();
-          debugLog("playhead", { playheadTime: t, segmentIndex: idx });
+          debugLog("playhead", { t, idx: clampedIdx });
         }
       }
 
@@ -1405,26 +1331,24 @@ export default function PreviewScreen() {
   }, [isPlaying]);
 
   // When current segment has no clip, advance after segment duration (timeline/RAF is single source)
-  useEffect(() => {
-    if (!seg || seg.uri || isScrubbing || isResizingRef.current || playList.length === 0 || !isPlaying) return;
-    const duration = seg.segmentDuration;
-    const timeoutId = setTimeout(() => {
-      if (isScrubbingRef.current || isResizingRef.current) {
-        if (__DEV__) debugLog("scrub:advance-blocked-during-interaction", { where: "timeout:noClipAdvance", idx: currentSegmentIndex });
-        return;
-      }
-      advanceTo(currentSegmentIndex + 1);
-    }, duration * 1000);
-    return () => clearTimeout(timeoutId);
-  }, [currentSegmentIndex, playList.length, seg?.startTime, seg?.endTime, seg?.segmentDuration, seg?.uri, isScrubbing, isPlaying]);
+  // No-clip segments: tick loop handles advancing via time comparison. No extra timeout needed.
 
   useEffect(() => {
     if (!seg || isScrubbing || !isPlaying) return;
+    // advanceTo already committed — skip re-seek but re-anchor clock.
+    if (advanceJustCommittedRef.current) {
+      advanceJustCommittedRef.current = false;
+      // Re-anchor the continuous clock to current playhead position.
+      clockOriginRef.current = Date.now() / 1000 - timelineTimeRef.current;
+      return;
+    }
     try {
       const info = getSegmentAtTime(playheadTime);
       const inSegment = info && info.segmentIndex === currentSegmentIndex;
       const startSec = inSegment ? info!.clipPosition : seg.clipStart;
       const startSecClamped = clampToFileDuration(seg.uri, startSec);
+      // Anchor continuous clock to current playhead.
+      clockOriginRef.current = Date.now() / 1000 - playheadTime;
       segmentStartTimeRef.current = Date.now() / 1000 - (inSegment ? playheadTime - seg.startTime : 0);
       if (seg.uri) {
         const activeRef = getMountedVideoRef(visibleSlotIndex);
@@ -1652,6 +1576,8 @@ export default function PreviewScreen() {
               if (ref) ref.pauseAsync().catch(() => {});
               soundRef.current?.pauseAsync().catch(() => {});
             } else {
+              // Re-anchor clock to current position when scrubbing ends.
+              clockOriginRef.current = Date.now() / 1000 - timelineTimeRef.current;
               if (isPlaying) soundRef.current?.playAsync().catch(() => {});
             }
           }}
@@ -1685,6 +1611,7 @@ export default function PreviewScreen() {
                   segmentStartTimeRef.current = Date.now() / 1000;
                 }
                 currentIndexRef.current = 0;
+                clockOriginRef.current = Date.now() / 1000;
                 const ref = getMountedVideoRef(visibleSlotIndex);
                 if (ref) ref.setPositionAsync(0).catch(() => {});
                 soundRef.current?.setPositionAsync(0).catch(() => {});

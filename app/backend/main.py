@@ -12,6 +12,7 @@ from typing import List, Optional
 from pathlib import Path
 from urllib.parse import unquote
 import subprocess
+from datetime import datetime
 
 app = FastAPI()
 
@@ -333,6 +334,7 @@ async def upload_song(
         return value.lower() in ('true', '1', 'yes')
     
     # Save options.json (AI reads minClipDuration/maxClipDuration for segment generation)
+    existing_options = _read_json_file(Path("uploads/options.json"), {})
     options_data = {
         "max_duration": int(max_duration),
         "density": density,
@@ -344,6 +346,7 @@ async def upload_song(
         "song_filename": song.filename,
         "minClipDuration": 0.1,
         "maxClipDuration": None,
+        "tap_mode": existing_options.get("tap_mode"),
     }
     options_path = "uploads/options.json"
     with open(options_path, "w") as f:
@@ -415,6 +418,7 @@ async def upload_media(
         return value.lower() in ('true', '1', 'yes')
 
     # Save options.json with all parameters
+    existing_options = _read_json_file(Path("uploads/options.json"), {})
     options_data = {
         "max_duration": int(max_duration),
         "density": density,
@@ -429,6 +433,7 @@ async def upload_media(
         
     options_data["minClipDuration"] = 0.1
     options_data["maxClipDuration"] = None
+    options_data["tap_mode"] = existing_options.get("tap_mode")
     options_path = "uploads/options.json"
     with open(options_path, "w") as f:
         json.dump(options_data, f, indent=2)
@@ -447,11 +452,125 @@ async def upload_media(
 AI_DIR = Path(__file__).resolve().parent / ".." / "ai"
 MAIN_AI_SCRIPT = AI_DIR / "main.py"
 ANALYZE_SCRIPT = AI_DIR / "analyze.py"
+CALIBRATE_SCRIPT = AI_DIR / "calibrate.py"
 COMPUTE_SEGMENTS_SCRIPT = AI_DIR / "compute_segments.py"
 CLIP_MAKER_SCRIPT = AI_DIR / "clip_maker.py"
 AI_VENV_PYTHON = AI_DIR / "venv" / "bin" / "python3"
 ANALYZE_RESULT_FILE = Path("uploads/analyze_result.json")
 ANALYZE_RESULT_FOR_PREVIEW_FILE = Path("uploads/analyze_result_for_preview.json")
+TAPS_FILE = Path("uploads/taps.json")
+OPTIONS_FILE = Path("uploads/options.json")
+
+
+def _read_json_file(path: Path, default_value):
+    if not path.exists():
+        return default_value
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def _write_json_atomic(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=str(path.parent), suffix=".tmp") as tmp:
+        json.dump(data, tmp, indent=2)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+
+@app.post("/api/taps/save")
+async def save_taps(body: dict = Body(...)):
+    try:
+        song_filename = (body.get("song_filename") or "").strip()
+        manual_cuts = body.get("manual_cuts") or []
+        if not song_filename:
+            return {"success": False, "error": "song_filename is required"}
+        taps_data = _read_json_file(TAPS_FILE, {})
+        taps_data[song_filename] = {
+            "song": song_filename,
+            "recorded_at": body.get("recorded_at") or datetime.utcnow().isoformat() + "Z",
+            "cut_count": len(manual_cuts),
+            "manual_cuts": manual_cuts,
+        }
+        _write_json_atomic(TAPS_FILE, taps_data)
+        return {"success": True, "cut_count": len(manual_cuts)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/taps/{song_filename:path}")
+async def get_taps(song_filename: str):
+    try:
+        decoded = unquote(song_filename).strip()
+        taps_data = _read_json_file(TAPS_FILE, {})
+        entry = taps_data.get(decoded)
+        if entry is None:
+            return {"manual_cuts": []}
+        return entry
+    except Exception:
+        return {"manual_cuts": []}
+
+
+@app.post("/api/options")
+async def update_options(body: dict = Body(...)):
+    try:
+        existing = _read_json_file(OPTIONS_FILE, {})
+        existing.update(body or {})
+        _write_json_atomic(OPTIONS_FILE, existing)
+        return {"success": True, "options": existing}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/calibrate")
+async def run_calibrate(body: dict = Body(...)):
+    try:
+        if not AI_VENV_PYTHON.exists():
+            return {"success": False, "error": f"AI Python not found at {AI_VENV_PYTHON}"}
+        song_filename = (body.get("song_filename") or "").strip()
+        if not song_filename:
+            return {"success": False, "error": "song_filename is required"}
+        # calibrate.py expects per-song taps file(s) under uploads/taps/.
+        # Source of truth is shared uploads/taps.json, so materialize it here.
+        taps_data = _read_json_file(TAPS_FILE, {})
+        entry = taps_data.get(song_filename)
+        if entry is None:
+            # fallback: decode/normalize match in case caller sends encoded or variant name
+            target = unquote(song_filename).strip().lower()
+            for k, v in taps_data.items():
+                if unquote(str(k)).strip().lower() == target:
+                    entry = v
+                    break
+        if entry is None:
+            return {"success": False, "error": f"No taps found for song '{song_filename}'"}
+        taps_dir = Path("uploads/taps")
+        taps_dir.mkdir(parents=True, exist_ok=True)
+        # Write both exact-name and stem-name files for compatibility with calibrate.py expectations.
+        stem = Path(song_filename).stem
+        per_song_payload = {
+            "song": song_filename,
+            "recorded_at": entry.get("recorded_at"),
+            "cut_count": int(entry.get("cut_count", len(entry.get("manual_cuts") or []))),
+            "manual_cuts": entry.get("manual_cuts") or [],
+        }
+        _write_json_atomic(taps_dir / f"{song_filename}.json", per_song_payload)
+        _write_json_atomic(taps_dir / f"{stem}.json", per_song_payload)
+        proc = subprocess.run(
+            [str(AI_VENV_PYTHON), str(CALIBRATE_SCRIPT), song_filename],
+            cwd=str(AI_DIR),
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+        output = ((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")).strip()
+        if proc.returncode != 0:
+            return {"success": False, "error": output or "Calibration failed"}
+        return {"success": True, "output": output}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "Calibration timed out"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 def _normalize_segment_for_preview(seg: dict) -> dict:
