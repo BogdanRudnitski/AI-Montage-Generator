@@ -18,9 +18,6 @@ CALIBRATION_JSON = "calibration.json"
 
 MAX_DURATION = int(os.environ.get('MAX_DURATION', '60'))
 
-# Start offset in full song (seconds). Backend sets SONG_START_SEC from options.json.
-SONG_START_SEC = float(os.environ.get('SONG_START_SEC', '0') or 0)
-
 # tap_mode can be overridden per-request via env var (set by backend before subprocess call).
 # Falls back to options.json value. Values: 'verbatim' | 'calibrate' | '' (AI only)
 TAP_MODE_OVERRIDE = os.environ.get('TAP_MODE', None)  # '' means AI-only, None means use options.json
@@ -50,7 +47,7 @@ def load_taps(song_filename):
     return [float(c['timestamp']) for c in data.get('manual_cuts', [])]
 
 def taps_to_cut_points(tap_timestamps, max_duration, song_start_sec=0.0):
-    """Map absolute tap times into cut_points relative to the analysis window [song_start, song_start+max_duration)."""
+    """Map absolute tap times into cut_points relative to the analysis window."""
     end_abs = song_start_sec + float(max_duration if max_duration else 1e9)
     rel_times = []
     for t in sorted(float(x) for x in tap_timestamps):
@@ -106,6 +103,7 @@ def bandpass_filter(data, lowcut, highcut, sr, order=4):
     b, a = butter(order, [low, high], btype='band')
     return filtfilt(b, a, data)
 
+
 def compute_onset_strength(audio, sr, hop_length=512):
     S        = np.abs(librosa.stft(audio, n_fft=2048, hop_length=hop_length))
     flux     = np.maximum(0, np.diff(S, axis=1))
@@ -115,22 +113,41 @@ def compute_onset_strength(audio, sr, hop_length=512):
 def detect_multiband_onsets(audio, sr, hop_length=512):
     bands = {'low': (20, 250), 'mid': (250, 4000), 'high': (4000, 16000)}
     times  = librosa.frames_to_time(np.arange(len(audio) // hop_length), sr=sr, hop_length=hop_length)
+
+    # Band-specific tuning: low band (kick) gets more sensitive settings
+    band_config = {
+        'low':  {'threshold_sigma': 0.1, 'distance_s': 0.15, 'prominence': 0.02},  # very sensitive
+        'mid':  {'threshold_sigma': 0.4, 'distance_s': 0.10, 'prominence': 0.05},
+        'high': {'threshold_sigma': 0.4, 'distance_s': 0.05, 'prominence': 0.05},
+    }
+
     onsets = {}
     for band_name, (lo, hi) in bands.items():
-        filtered  = bandpass_filter(audio, lo, hi, sr)
-        rms       = librosa.feature.rms(y=filtered, frame_length=2048, hop_length=hop_length)[0]
-        rms       = gaussian_filter1d(rms, sigma=2)
-        if np.max(rms) > 0:
-            rms /= np.max(rms)
-        threshold = np.mean(rms) + 0.3 * np.std(rms)
-        peaks, props = find_peaks(rms, height=threshold,
-                                  distance=int(0.05 * sr / hop_length), prominence=0.05)
+        cfg      = band_config[band_name]
+        filtered = bandpass_filter(audio, lo, hi, sr)
+
+        # Use onset strength (flux) instead of raw RMS for low band —
+        # much better at catching transient attacks vs sustained energy
+        if band_name == 'low':
+            env = compute_onset_strength(filtered, sr, hop_length)
+        else:
+            env = librosa.feature.rms(y=filtered, frame_length=2048, hop_length=hop_length)[0]
+        env = gaussian_filter1d(env, sigma=1 if band_name == 'low' else 2)
+
+        if np.max(env) > 0:
+            env = env / np.max(env)
+
+        threshold = np.mean(env) + cfg['threshold_sigma'] * np.std(env)
+        peaks, props = find_peaks(env, height=threshold,
+                                  distance=int(cfg['distance_s'] * sr / hop_length),
+                                  prominence=cfg['prominence'])
         onsets[band_name] = {
-            'times':     times[peaks],
+            'times':     times[peaks] if len(peaks) < len(times) else times[peaks[:len(times)-1]],
             'strengths': props['peak_heights'],
-            'envelope':  rms,
+            'envelope':  env,
         }
     return onsets, times
+
 
 def estimate_bpm_and_beats(drum_audio, sr):
     onset_env    = librosa.onset.onset_strength(y=drum_audio, sr=sr, hop_length=512)
@@ -146,6 +163,7 @@ def estimate_bpm_and_beats(drum_audio, sr):
     else:
         grid_times = beat_times
     return tempo, beat_times, grid_times
+
 
 def detect_vocal_repetitions(vocal_audio, sr, hop_length=512):
     mfcc       = librosa.feature.mfcc(y=vocal_audio, sr=sr, n_mfcc=13, hop_length=hop_length)
@@ -177,36 +195,130 @@ def detect_vocal_repetitions(vocal_audio, sr, hop_length=512):
                     break
     return reps
 
+
 def detect_vocal_transients(vocal_audio, sr, hop_length=512):
     filtered  = bandpass_filter(vocal_audio, 1000, 4000, sr)
     onset     = compute_onset_strength(filtered, sr, hop_length)
-    threshold = np.mean(onset) + 0.5 * np.std(onset)
-    times     = librosa.frames_to_time(np.arange(len(onset)), sr=sr, hop_length=hop_length)
-    peaks, props = find_peaks(onset, height=threshold,
-                              distance=int(0.08 * sr / hop_length),
-                              prominence=np.std(onset) * 0.3)
+
+    # Normalize so strength is comparable across songs
+    onset_max = np.max(onset) if np.max(onset) > 0 else 1.0
+    onset_n   = onset / onset_max
+
+    # Tight threshold — only genuine punchy hits (top ~7% of frames)
+    threshold   = np.mean(onset_n) + 1.5 * np.std(onset_n)
+    times       = librosa.frames_to_time(np.arange(len(onset_n)), sr=sr, hop_length=hop_length)
+    peaks, props = find_peaks(onset_n, height=threshold,
+                              distance=int(0.25 * sr / hop_length),
+                              prominence=np.std(onset_n) * 0.8)
     return times[peaks], props['peak_heights']
 
+
 def detect_bass_drops(bass_audio, sr, hop_length=512):
-    filtered = bandpass_filter(bass_audio, 20, 150, sr)
+    """
+    Detects bass events in three ways:
+    1. Energy increases (classic bass drop / re-entry)
+    2. RMS peaks (strong sustained bass moments)
+    3. Onset transients (note attacks in bass line)
+    Returns normalized intensity in [0, 1] for all events.
+    """
+    filtered = bandpass_filter(bass_audio, 20, 250, sr)
     rms      = gaussian_filter1d(
                    librosa.feature.rms(y=filtered, frame_length=2048, hop_length=hop_length)[0],
                    sigma=3)
     times    = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
     drops    = []
-    window   = int(0.5 * sr / hop_length)
+
+    rms_ref = np.percentile(rms, 95) if np.max(rms) > 0 else 1.0
+    if rms_ref < 1e-9:
+        rms_ref = np.max(rms) if np.max(rms) > 0 else 1.0
+    rms_n = np.clip(rms / rms_ref, 0.0, 1.0)
+
+    seen = set()
+
+    def _add(time_val, intensity_norm, kind):
+        key = round(time_val, 1)
+        if key not in seen:
+            seen.add(key)
+            drops.append({'time': time_val,
+                          'intensity': float(np.clip(intensity_norm, 0.0, 1.0)),
+                          'type': kind})
+
+    # 1. Energy increases (bass re-entry / drops)
+    window = int(0.5 * sr / hop_length)
     for i in range(window, len(rms) - window, window // 4):
         before = np.mean(rms[i-window:i])
         after  = np.mean(rms[i:i+window])
-        if after > before * 1.5 and before > 0.001:
-            drops.append({'time': times[i], 'intensity': after / before, 'type': 'increase'})
-    if np.max(rms) > 0:
-        rms_n = rms / np.max(rms)
-        peaks, _ = find_peaks(rms_n, height=0.4,
-                              distance=int(1.0 * sr / hop_length), prominence=0.15)
-        for p in peaks:
-            drops.append({'time': times[p], 'intensity': rms_n[p], 'type': 'peak'})
+        if after > before * 1.3 and before > 0.0005:
+            norm = np.clip((after / max(before, 1e-9) - 1.0) / 3.0, 0.0, 1.0)
+            _add(times[i], norm, 'increase')
+
+    # 2. RMS peaks — threshold relative to active-bass frames only
+    active_frames = rms_n[rms_n > 0.1]
+    if len(active_frames) > 10:
+        peak_threshold = np.percentile(active_frames, 40)
+    else:
+        peak_threshold = 0.15
+    peaks, props = find_peaks(rms_n, height=peak_threshold,
+                              distance=int(0.3 * sr / hop_length), prominence=0.05)
+    for p in peaks:
+        _add(times[p], rms_n[p], 'peak')
+
+    # 3. Bass onset transients (note attacks)
+    onset_env = compute_onset_strength(filtered, sr, hop_length)
+    onset_ref = np.percentile(onset_env, 95) if np.max(onset_env) > 0 else 1.0
+    if onset_ref < 1e-9:
+        onset_ref = np.max(onset_env) if np.max(onset_env) > 0 else 1.0
+    onset_n   = np.clip(onset_env / onset_ref, 0.0, 1.0)
+    threshold = np.mean(onset_n) + 0.4 * np.std(onset_n)
+    o_peaks, o_props = find_peaks(onset_n, height=threshold,
+                                  distance=int(0.1 * sr / hop_length),
+                                  prominence=0.05)
+    for p in o_peaks:
+        _add(times[p], onset_n[p], 'onset')
+
     return drops
+
+
+def compute_bass_activity(bass_audio, sr, hop_length=512):
+    """Returns a normalized RMS envelope for bass — used to boost scores when bass is active."""
+    filtered = bandpass_filter(bass_audio, 20, 250, sr)
+    rms      = gaussian_filter1d(
+                   librosa.feature.rms(y=filtered, frame_length=2048, hop_length=hop_length)[0],
+                   sigma=5)
+    rms_ref  = np.percentile(rms, 95) if np.max(rms) > 0 else 1.0
+    if rms_ref < 1e-9:
+        rms_ref = np.max(rms) if np.max(rms) > 0 else 1.0
+    times    = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
+    return times, np.clip(rms / rms_ref, 0.0, 1.0)
+
+
+def compute_drum_low_prominence(drum_audio, sr, hop_length=512):
+    """
+    Returns a single float [0, 1] representing how prominent/dominant
+    the kick drum (low band) is in this track overall.
+    High = kick is loud, consistent, and regular (like a 4-on-the-floor beat).
+    """
+    filtered = bandpass_filter(drum_audio, 20, 250, sr)
+    rms      = gaussian_filter1d(
+                   librosa.feature.rms(y=filtered, frame_length=2048, hop_length=hop_length)[0],
+                   sigma=3)
+    rms_max  = np.max(rms) if np.max(rms) > 0 else 1.0
+    rms_n    = rms / rms_max
+
+    min_lag = int(0.3 * sr / hop_length)
+    max_lag = int(0.7 * sr / hop_length)
+    if len(rms_n) > max_lag * 2:
+        acorr = np.correlate(rms_n, rms_n, mode='full')
+        acorr = acorr[len(acorr)//2:]
+        acorr /= acorr[0] if acorr[0] > 0 else 1.0
+        regularity = float(np.max(acorr[min_lag:max_lag]))
+    else:
+        regularity = 0.0
+
+    energy     = float(np.mean(rms_n))
+    prominence = np.clip(0.5 * regularity + 0.5 * energy * 3.0, 0.0, 1.0)
+    return float(prominence)
+
 
 def detect_drum_pattern_changes(drum_audio, sr, segment_duration=2.0):
     hop_length     = 512
@@ -243,7 +355,8 @@ def snap_to_grid(time, grid_times, max_distance=0.05):
 # ─── Scoring ──────────────────────────────────────────────────────────────────
 
 def score_cut_point(event, beat_times, grid_times, pattern_changes, bar_length,
-                    type_bonuses=None):
+                    type_bonuses=None, bass_activity_at_time=0.0, focus_bass=True,
+                    drum_low_prominence=0.0):
     time   = event['time']
     score  = 0
     score += event.get('strength', 0.5) * 30
@@ -265,7 +378,10 @@ def score_cut_point(event, beat_times, grid_times, pattern_changes, bar_length,
             break
 
     type_base = {
-        'bass_drop':        15,
+        'bass_drop':        30,
+        'drum_low':         20,
+        'drum_mid':          8,
+        'drum_high':         5,
         'vocal_transient':   8,
         'vocal_repetition': 18,
         'pattern_change':   12,
@@ -273,6 +389,26 @@ def score_cut_point(event, beat_times, grid_times, pattern_changes, bar_length,
     score += type_base.get(event['type'], 0)
     if event['type'] == 'vocal_repetition' and event.get('gap', 1.0) < 0.5:
         score += 10
+
+    # Drum prominence context: when kick is dominant, boost drum_low and suppress rest
+    is_drum_low = event['type'] == 'drum_low'
+    if drum_low_prominence > 0.4:
+        if is_drum_low:
+            score += drum_low_prominence * 30
+        elif event['type'] not in ('bass_drop',):
+            score -= drum_low_prominence * 20
+
+    # Bass context: boost bass events when bass is active, suppress others
+    if focus_bass:
+        is_bass     = event['type'] == 'bass_drop'
+        bass_active = bass_activity_at_time
+
+        if is_bass and bass_active > 0.2:
+            score += bass_active * 35
+        elif not is_bass and not is_drum_low and bass_active > 0.35:
+            score -= bass_active * 35
+        elif not is_bass and bass_active < 0.15 and drum_low_prominence < 0.4:
+            score += 12
 
     # Calibration type bonus
     if type_bonuses:
@@ -299,9 +435,9 @@ def analyze_audio_advanced(
     tap_mode='verbatim' → use tap timestamps directly, skip AI
     tap_mode='calibrate'→ run AI analysis but apply calibration.json learnt from taps
     """
-    script_dir   = os.path.dirname(os.path.abspath(__file__))
+    script_dir    = os.path.dirname(os.path.abspath(__file__))
     song_filename = os.path.basename(audio_path)
-    song_key     = os.path.splitext(song_filename)[0]
+    song_key      = os.path.splitext(song_filename)[0]
 
     print(f"\n{'='*60}")
     print(f"🎵 Analyzing: {song_filename}")
@@ -315,24 +451,28 @@ def analyze_audio_advanced(
     if song_start_sec > 0:
         print(f"   Song start offset: {song_start_sec:.2f}s\n")
 
-    # ── Real audio metadata (always needed) ───────────────────────────────────
-    wav_np, sr = librosa.load(audio_path, sr=22050, mono=False)
+    # ── Load only the analysis window (offset + max_duration) ────────────────
+    full_duration = float(librosa.get_duration(path=audio_path))
+    if not np.isfinite(full_duration) or full_duration <= 0:
+        full_duration = 0.01
+    song_start_sec = min(song_start_sec, max(0.0, full_duration - 0.01))
+    load_duration  = float(max_duration) if (max_duration and max_duration > 0) else None
+
+    wav_np, sr = librosa.load(
+        audio_path,
+        sr=22050,
+        mono=False,
+        offset=song_start_sec,
+        duration=load_duration,
+    )
+    if wav_np.ndim == 2 and wav_np.shape[1] <= 4 < wav_np.shape[0]:
+        wav_np = np.ascontiguousarray(wav_np.T)
     if wav_np.ndim == 1:
         wav_np = np.stack([wav_np, wav_np])
     elif wav_np.shape[0] == 1:
         wav_np = np.vstack([wav_np, wav_np])
 
-    full_duration = wav_np.shape[1] / sr
-    start_sample = int(min(song_start_sec * sr, max(0, wav_np.shape[1] - 1)))
-    wav_np = wav_np[:, start_sample:]
-    remaining = wav_np.shape[1] / sr
-    if max_duration and max_duration > 0:
-        n_keep = min(int(max_duration * sr), wav_np.shape[1])
-        wav_np = wav_np[:, :n_keep]
-        duration = float(wav_np.shape[1] / sr)
-    else:
-        duration = float(remaining)
-
+    duration = float(wav_np.shape[1] / sr)
     print(f"   ⏱️  Window: {duration:.2f}s (from {song_start_sec:.2f}s in {full_duration:.2f}s total)\n")
 
     # ── VERBATIM TAP MODE ─────────────────────────────────────────────────────
@@ -345,7 +485,6 @@ def analyze_audio_advanced(
             cut_points = taps_to_cut_points(taps, max_duration or duration, song_start_sec=song_start_sec)
             print(f"✅ Using {len(cut_points)} manual taps verbatim\n")
 
-            # Still get BPM from drums for metadata
             mono = np.mean(wav_np, axis=0)
             onset_env = librosa.onset.onset_strength(y=mono, sr=sr)
             tempo_r, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
@@ -377,13 +516,17 @@ def analyze_audio_advanced(
 
     print("🥁 Multi-band onset detection...")
     drum_onsets, _ = detect_multiband_onsets(drum_mono, sr)
+    drum_low_prominence = compute_drum_low_prominence(drum_mono, sr)
     print(f"   Low: {len(drum_onsets['low']['times'])}  "
           f"Mid: {len(drum_onsets['mid']['times'])}  "
-          f"High: {len(drum_onsets['high']['times'])}\n")
+          f"High: {len(drum_onsets['high']['times'])}  "
+          f"Kick prominence: {drum_low_prominence:.2f}\n")
 
     vocal_times, vocal_strengths = (detect_vocal_transients(vocal_mono, sr)
                                     if focus_vocals else (np.array([]), np.array([])))
     if focus_vocals:
+        if len(vocal_strengths) > 0 and np.max(vocal_strengths) > 0:
+            vocal_strengths = vocal_strengths / np.max(vocal_strengths)
         print(f"🎤 Vocal transients: {len(vocal_times)}\n")
 
     vocal_reps = detect_vocal_repetitions(vocal_mono, sr) if focus_repetitions else []
@@ -392,7 +535,12 @@ def analyze_audio_advanced(
 
     bass_drops = detect_bass_drops(bass_mono, sr) if focus_bass else []
     if focus_bass:
-        print(f"🎢 Bass drops: {len(bass_drops)}\n")
+        print(f"🎸 Bass events: {len(bass_drops)}\n")
+
+    bass_activity_times, bass_activity_rms = (
+        compute_bass_activity(bass_mono, sr) if focus_bass
+        else (np.array([0.0]), np.array([0.0]))
+    )
 
     print("🔄 Detecting drum pattern changes...")
     pattern_changes = detect_drum_pattern_changes(drum_mono, sr)
@@ -401,8 +549,11 @@ def analyze_audio_advanced(
     # ── Build candidates ──────────────────────────────────────────────────────
     candidates = []
     for band in ['low', 'mid', 'high']:
-        for t, s in zip(drum_onsets[band]['times'], drum_onsets[band]['strengths']):
-            candidates.append({'time': t, 'strength': s, 'type': f'drum_{band}', 'multi_band': 0})
+        strengths = drum_onsets[band]['strengths']
+        s_max = np.max(strengths) if len(strengths) > 0 and np.max(strengths) > 0 else 1.0
+        for t, s in zip(drum_onsets[band]['times'], strengths):
+            candidates.append({'time': t, 'strength': float(s / s_max),
+                                'type': f'drum_{band}', 'multi_band': 0})
     for t, s in zip(vocal_times, vocal_strengths):
         candidates.append({'time': t, 'strength': s, 'type': 'vocal_transient', 'multi_band': 0})
     for rep in vocal_reps:
@@ -444,8 +595,12 @@ def analyze_audio_advanced(
 
     scored = []
     for c in candidates:
+        bass_at_t = float(np.interp(c['time'], bass_activity_times, bass_activity_rms))
         score = score_cut_point(c, beat_times, grid_times, pattern_changes,
-                                bar_length, type_bonuses)
+                                bar_length, type_bonuses,
+                                bass_activity_at_time=bass_at_t,
+                                focus_bass=focus_bass,
+                                drum_low_prominence=drum_low_prominence)
         if score < adjusted_threshold:
             continue
         t, snapped = (snap_to_grid(c['time'], grid_times)
@@ -546,7 +701,7 @@ def main():
     focus_vocals      = True
     focus_repetitions = True
     sync_to_grid      = False
-    tap_mode          = None   # None | 'verbatim' | 'calibrate'
+    tap_mode          = None
 
     if os.path.exists(options_file):
         try:
@@ -559,22 +714,26 @@ def main():
             focus_vocals      = opts.get('focus_vocals', focus_vocals)
             focus_repetitions = opts.get('focus_repetitions', focus_repetitions)
             sync_to_grid      = opts.get('sync_to_grid', sync_to_grid)
-            tap_mode          = opts.get('tap_mode', tap_mode)  # 'verbatim' | 'calibrate' | null
+            tap_mode          = opts.get('tap_mode', tap_mode)
             print(f"📋 Options loaded  tap_mode={tap_mode}  density={density}  aggressiveness={aggressiveness}")
         except Exception as e:
             print(f"⚠️  options.json error: {e} — using defaults")
 
-    if 'SONG_START_SEC' in os.environ:
-        song_start_sec = float(os.environ.get('SONG_START_SEC') or 0)
-    else:
+    # Prefer options.json, then env override
+    song_start_sec = 0.0
+    try:
+        with open(options_file) as f:
+            _o = json.load(f)
+        song_start_sec = float(_o.get('song_start_sec', 0) or 0)
+    except Exception:
+        pass
+    _env_ss = os.environ.get('SONG_START_SEC')
+    if _env_ss is not None and str(_env_ss).strip() != '':
         try:
-            with open(options_file) as f:
-                _o = json.load(f)
-            song_start_sec = float(_o.get('song_start_sec', 0) or 0)
-        except Exception:
-            song_start_sec = 0.0
+            song_start_sec = float(_env_ss)
+        except ValueError:
+            pass
 
-    # Per-request override beats options.json (set by backend via TAP_MODE env var).
     if TAP_MODE_OVERRIDE is not None:
         tap_mode = TAP_MODE_OVERRIDE if TAP_MODE_OVERRIDE != '' else None
         print(f"🔧 TAP_MODE env override: {tap_mode!r}")
@@ -591,7 +750,6 @@ def main():
         with open(output_json_abs) as f:
             existing = json.load(f)
 
-    # Delete stale analyze_result.json so the backend is forced to serve fresh results.
     analyze_result_path = os.path.join(project_root, "backend", "uploads", "analyze_result.json")
     if os.path.exists(analyze_result_path):
         os.remove(analyze_result_path)
@@ -615,7 +773,6 @@ def main():
         with open(output_json_abs, 'w') as f:
             json.dump(results, f, indent=2)
 
-        # Update options.json song_filename
         if os.path.exists(options_file):
             try:
                 with open(options_file) as f:

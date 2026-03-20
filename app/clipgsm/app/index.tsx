@@ -483,7 +483,11 @@ export default function ExploreScreen() {
         bpm: data.bpm,
         cut_points: data.cut_points || [],
         segments: data.segments || [],
-        song_start_sec: songStartSec,
+        // Prefer server echo so preview matches what analyze.py actually used
+        song_start_sec:
+          typeof data.song_start_sec === "number" && Number.isFinite(data.song_start_sec)
+            ? data.song_start_sec
+            : songStartSec,
       });
       setMediaListForPreview(
         mediaList.map((m) => ({

@@ -703,9 +703,14 @@ async def analyze_only(body: Optional[dict] = Body(None)):
             return {"success": False, "error": f"analyze failed: {(proc.stderr or proc.stdout or '')[:500]}"}
         print("[TRACE] analyze.py exit 0; running compute_segments.py ...")
         # 2) Run compute_segments.py (writes uploads/analyze_result.json and uploads/segments.json)
+        # Pass same window vars as analyze (clip_maker MAX_DURATION import reads env at import time).
+        seg_env = os.environ.copy()
+        seg_env["MAX_DURATION"] = str(max_duration)
+        seg_env["SONG_START_SEC"] = str(float(options.get("song_start_sec", 0) or 0))
         proc2 = subprocess.run(
             [str(AI_VENV_PYTHON), str(COMPUTE_SEGMENTS_SCRIPT)],
             cwd=str(AI_DIR),
+            env=seg_env,
             capture_output=True,
             text=True,
         )
@@ -729,6 +734,7 @@ async def analyze_only(body: Optional[dict] = Body(None)):
             "duration": data.get("duration", 0),
             "max_duration": data.get("max_duration", max_duration),
             "bpm": data.get("bpm", 0),
+            "song_start_sec": float(data.get("song_start_sec", options.get("song_start_sec", 0)) or 0),
             "cut_points": data.get("cut_points") or [],
             "segments": segments,
         }

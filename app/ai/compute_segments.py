@@ -60,6 +60,7 @@ def main():
     duration = float(data.get("duration", 0))
     max_dur = data.get("max_duration") or MAX_DURATION
     duration = min(duration, max_dur) if max_dur else duration
+    song_start_sec = float(data.get("song_start_sec", 0) or 0)
     if not cut_points:
         print("Error: No cut points in analysis.")
         sys.exit(1)
@@ -80,6 +81,7 @@ def main():
         "duration": round(duration, 3),
         "max_duration": max_dur,
         "bpm": bpm,
+        "song_start_sec": round(song_start_sec, 4),
         "cut_points": cut_points,
         "segments": segments,
     }
