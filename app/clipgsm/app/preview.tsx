@@ -105,6 +105,8 @@ interface PlayItem {
 export default function PreviewScreen() {
   const router = useRouter();
   const { analyzeResult, mediaList, songUri, setMediaListForPreview, setPendingExportSegments, exportSegmentsRef } = useAnalyze();
+  const songOffsetSec = analyzeResult?.song_start_sec ?? 0;
+  const timelineToAudioMs = (t: number) => Math.max(0, (t + songOffsetSec) * 1000);
   const NUM_VIDEO_SLOTS = 3;
   const videoRefs = [useRef<Video>(null), useRef<Video>(null), useRef<Video>(null)];
   const fileDurationByUriRef = useRef<Record<string, number>>({});
@@ -915,7 +917,7 @@ export default function PreviewScreen() {
       setPlayheadTime(timelineTime);
       // Re-anchor continuous clock to scrubbed position.
       clockOriginRef.current = Date.now() / 1000 - timelineTime;
-      soundRef.current?.setPositionAsync(timelineTime * 1000).catch(() => {});
+      soundRef.current?.setPositionAsync(timelineToAudioMs(timelineTime)).catch(() => {});
     }
 
     const slot = currentVisibleSlotRef.current;
@@ -946,7 +948,7 @@ export default function PreviewScreen() {
     const targetIndex = info.segmentIndex;
     const currentIndex = currentIndexRef.current;
     if (targetIndex !== currentIndex) {
-      soundRef.current?.setPositionAsync(time * 1000).catch(() => {});
+      soundRef.current?.setPositionAsync(timelineToAudioMs(time)).catch(() => {});
       if (isScrubbingRef.current || isResizingRef.current) {
         if (__DEV__) debugLog("scrub:advance-blocked-during-interaction", { where: "seekToTime", to: targetIndex });
         return;
@@ -954,7 +956,7 @@ export default function PreviewScreen() {
       advanceTo(targetIndex, { force: true, seekToClipPosition: info.clipPosition });
     } else {
       setCurrentSegmentIndex(targetIndex);
-      soundRef.current?.setPositionAsync(time * 1000).catch(() => {});
+      soundRef.current?.setPositionAsync(timelineToAudioMs(time)).catch(() => {});
       const item = playList[targetIndex];
       if (item?.uri) {
         const slotIndex = currentVisibleSlotRef.current;
@@ -1068,9 +1070,13 @@ export default function PreviewScreen() {
         });
         const { sound } = await Audio.Sound.createAsync(
           { uri: songUri },
-          { shouldPlay: true, isLooping: false }
+          { shouldPlay: false, isLooping: false }
         );
-        if (mounted) soundRef.current = sound;
+        if (mounted) {
+          soundRef.current = sound;
+          await sound.setPositionAsync(timelineToAudioMs(0));
+          await sound.playAsync();
+        }
       } catch (e) {
         console.warn("Preview: could not play song", e);
       }
@@ -1080,7 +1086,7 @@ export default function PreviewScreen() {
       soundRef.current?.unloadAsync().catch(() => {});
       soundRef.current = null;
     };
-  }, [songUri]);
+  }, [songUri, songOffsetSec]);
 
   currentIndexRef.current = currentSegmentIndex;
 
@@ -1552,7 +1558,7 @@ export default function PreviewScreen() {
               if (info.segmentIndex !== currentIndexRef.current) {
                 timelineTimeRef.current = t;
                 setPlayheadTime(t);
-                soundRef.current?.setPositionAsync(t * 1000).catch(() => {});
+                soundRef.current?.setPositionAsync(timelineToAudioMs(t)).catch(() => {});
                 if (isScrubbingRef.current || isResizingRef.current) {
                   if (__DEV__) debugLog("scrub:advance-blocked-during-interaction", { where: "onSelectSegment", to: info.segmentIndex });
                 } else {
@@ -1561,7 +1567,7 @@ export default function PreviewScreen() {
               } else {
                 setCurrentSegmentIndex(info.segmentIndex);
                 pendingSeekRef.current = { segmentIndex: info.segmentIndex, clipPosition: info.clipPosition };
-                soundRef.current?.setPositionAsync(t * 1000).catch(() => {});
+                soundRef.current?.setPositionAsync(timelineToAudioMs(t)).catch(() => {});
               }
             }
           }}
@@ -1614,7 +1620,7 @@ export default function PreviewScreen() {
                 clockOriginRef.current = Date.now() / 1000;
                 const ref = getMountedVideoRef(visibleSlotIndex);
                 if (ref) ref.setPositionAsync(0).catch(() => {});
-                soundRef.current?.setPositionAsync(0).catch(() => {});
+                soundRef.current?.setPositionAsync(timelineToAudioMs(0)).catch(() => {});
                 setPlaybackEnded(false);
                 setIsPlaying(true);
                 soundRef.current?.playAsync().catch(() => {});

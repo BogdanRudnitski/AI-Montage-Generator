@@ -18,6 +18,9 @@ CALIBRATION_JSON = "calibration.json"
 
 MAX_DURATION = int(os.environ.get('MAX_DURATION', '60'))
 
+# Start offset in full song (seconds). Backend sets SONG_START_SEC from options.json.
+SONG_START_SEC = float(os.environ.get('SONG_START_SEC', '0') or 0)
+
 # tap_mode can be overridden per-request via env var (set by backend before subprocess call).
 # Falls back to options.json value. Values: 'verbatim' | 'calibrate' | '' (AI only)
 TAP_MODE_OVERRIDE = os.environ.get('TAP_MODE', None)  # '' means AI-only, None means use options.json
@@ -46,8 +49,16 @@ def load_taps(song_filename):
         data = json.load(f)
     return [float(c['timestamp']) for c in data.get('manual_cuts', [])]
 
-def taps_to_cut_points(tap_timestamps, max_duration):
-    """Return tap timestamps as cut_points in the standard output schema."""
+def taps_to_cut_points(tap_timestamps, max_duration, song_start_sec=0.0):
+    """Map absolute tap times into cut_points relative to the analysis window [song_start, song_start+max_duration)."""
+    end_abs = song_start_sec + float(max_duration if max_duration else 1e9)
+    rel_times = []
+    for t in sorted(float(x) for x in tap_timestamps):
+        if t < song_start_sec - 1e-6:
+            continue
+        if t >= end_abs - 1e-6:
+            continue
+        rel_times.append(t - song_start_sec)
     return [
         {
             'timestamp':      float(t),
@@ -58,8 +69,7 @@ def taps_to_cut_points(tap_timestamps, max_duration):
             'description':    'Manual Tap',
             'repetition_gap': None,
         }
-        for t in sorted(tap_timestamps)
-        if float(t) <= max_duration
+        for t in rel_times
     ]
 
 # ─── Calibration helpers ──────────────────────────────────────────────────────
@@ -282,6 +292,7 @@ def analyze_audio_advanced(
     focus_repetitions=True,
     sync_to_grid=False,
     tap_mode=None,          # None | 'verbatim' | 'calibrate'
+    song_start_sec=0.0,
 ):
     """
     tap_mode=None       → pure AI analysis
@@ -300,6 +311,9 @@ def analyze_audio_advanced(
     print(f"⚙️  Settings: density={density}, aggressiveness={aggressiveness:.1f}")
     if max_duration:
         print(f"   Max duration: {max_duration}s\n")
+    song_start_sec = max(0.0, float(song_start_sec or 0.0))
+    if song_start_sec > 0:
+        print(f"   Song start offset: {song_start_sec:.2f}s\n")
 
     # ── Real audio metadata (always needed) ───────────────────────────────────
     wav_np, sr = librosa.load(audio_path, sr=22050, mono=False)
@@ -309,13 +323,17 @@ def analyze_audio_advanced(
         wav_np = np.vstack([wav_np, wav_np])
 
     full_duration = wav_np.shape[1] / sr
+    start_sample = int(min(song_start_sec * sr, max(0, wav_np.shape[1] - 1)))
+    wav_np = wav_np[:, start_sample:]
+    remaining = wav_np.shape[1] / sr
     if max_duration and max_duration > 0:
-        wav_np   = wav_np[:, :int(max_duration * sr)]
-        duration = min(max_duration, full_duration)
+        n_keep = min(int(max_duration * sr), wav_np.shape[1])
+        wav_np = wav_np[:, :n_keep]
+        duration = float(wav_np.shape[1] / sr)
     else:
-        duration = full_duration
+        duration = float(remaining)
 
-    print(f"   ⏱️  {duration:.2f}s (of {full_duration:.2f}s total)\n")
+    print(f"   ⏱️  Window: {duration:.2f}s (from {song_start_sec:.2f}s in {full_duration:.2f}s total)\n")
 
     # ── VERBATIM TAP MODE ─────────────────────────────────────────────────────
     if tap_mode == 'verbatim':
@@ -324,7 +342,7 @@ def analyze_audio_advanced(
             print("⚠️  No tap file found — falling back to AI analysis.\n")
             tap_mode = None
         else:
-            cut_points = taps_to_cut_points(taps, duration)
+            cut_points = taps_to_cut_points(taps, max_duration or duration, song_start_sec=song_start_sec)
             print(f"✅ Using {len(cut_points)} manual taps verbatim\n")
 
             # Still get BPM from drums for metadata
@@ -337,7 +355,7 @@ def analyze_audio_advanced(
             return _build_result(song_filename, cut_points, duration, full_duration,
                                  max_duration, tempo, beat_times, len(taps),
                                  density, aggressiveness, focus_bass, focus_vocals,
-                                 focus_repetitions, sync_to_grid)
+                                 focus_repetitions, sync_to_grid, song_start_sec)
 
     # ── AI ANALYSIS (shared by None and 'calibrate') ──────────────────────────
     print("🤖 Loading Demucs AI model...")
@@ -470,17 +488,19 @@ def analyze_audio_advanced(
     return _build_result(song_filename, filtered, duration, full_duration,
                          max_duration, tempo, beat_times[:20].tolist() if hasattr(beat_times, 'tolist') else list(beat_times)[:20],
                          len(candidates), density, aggressiveness,
-                         focus_bass, focus_vocals, focus_repetitions, sync_to_grid)
+                         focus_bass, focus_vocals, focus_repetitions, sync_to_grid, song_start_sec)
 
 
 def _build_result(song_filename, cut_points, duration, full_duration, max_duration,
                   tempo, beat_times, total_candidates, density, aggressiveness,
-                  focus_bass, focus_vocals, focus_repetitions, sync_to_grid):
+                  focus_bass, focus_vocals, focus_repetitions, sync_to_grid,
+                  song_start_sec=0.0):
     return {
         'last_analyzed':    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'duration':         float(duration),
         'full_duration':    float(full_duration),
         'max_duration':     max_duration,
+        'song_start_sec':   float(song_start_sec or 0.0),
         'bpm':              float(tempo),
         'beat_times':       [float(t) for t in beat_times],
         'total_candidates': total_candidates,
@@ -489,6 +509,7 @@ def _build_result(song_filename, cut_points, duration, full_duration, max_durati
             'density':            density,
             'aggressiveness':     aggressiveness,
             'max_duration':       max_duration,
+            'song_start_sec':     float(song_start_sec or 0.0),
             'focus_bass':         focus_bass,
             'focus_vocals':       focus_vocals,
             'focus_repetitions':  focus_repetitions,
@@ -543,6 +564,16 @@ def main():
         except Exception as e:
             print(f"⚠️  options.json error: {e} — using defaults")
 
+    if 'SONG_START_SEC' in os.environ:
+        song_start_sec = float(os.environ.get('SONG_START_SEC') or 0)
+    else:
+        try:
+            with open(options_file) as f:
+                _o = json.load(f)
+            song_start_sec = float(_o.get('song_start_sec', 0) or 0)
+        except Exception:
+            song_start_sec = 0.0
+
     # Per-request override beats options.json (set by backend via TAP_MODE env var).
     if TAP_MODE_OVERRIDE is not None:
         tap_mode = TAP_MODE_OVERRIDE if TAP_MODE_OVERRIDE != '' else None
@@ -553,7 +584,7 @@ def main():
         print(f"⚠️  '{target_song}' not found, using '{first_song}'")
 
     audio_path = os.path.join(audio_folder_abs, first_song)
-    print(f"🎵 Song: {first_song}  |  Max duration: {MAX_DURATION}s\n")
+    print(f"🎵 Song: {first_song}  |  Max duration: {MAX_DURATION}s  |  Window start: {song_start_sec:.2f}s\n")
 
     existing = {}
     if os.path.exists(output_json_abs):
@@ -577,6 +608,7 @@ def main():
             focus_repetitions=focus_repetitions,
             sync_to_grid=sync_to_grid,
             tap_mode=tap_mode,
+            song_start_sec=song_start_sec,
         )
 
         results = {**existing, first_song: analysis}

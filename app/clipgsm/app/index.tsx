@@ -9,6 +9,7 @@ import Slider from '@react-native-community/slider';
 import { SERVER_URL } from "../config";
 import { useAnalyze } from "../context/AnalyzeContext";
 import { getSavedTracks, addTrackToLibrary, removeTrackFromLibrary, type SavedTrack } from "../lib/musicLibrary";
+import { SongRangePickerModal } from "../components/SongRangePickerModal";
 
 const { width } = Dimensions.get("window");
 const ART_SQUARE_SIZE = 120;
@@ -69,6 +70,9 @@ export default function ExploreScreen() {
   const [songUploaded, setSongUploaded] = useState(false);
   const [generateLoading, setGenerateLoading] = useState(false);
   const [duration, setDuration] = useState<number>(30);
+  /** Start time (seconds) in the full track for the analysis window; must match backend/options. */
+  const [songStartSec, setSongStartSec] = useState(0);
+  const [showSongRangeModal, setShowSongRangeModal] = useState(false);
   const [syncToGrid, setSyncToGrid] = useState(false);
   
   // Advanced options
@@ -223,6 +227,7 @@ export default function ExploreScreen() {
     formData.append("focus_vocals", focusVocals.toString());
     formData.append("focus_repetitions", focusRepetitions.toString());
     formData.append("sync_to_grid", syncToGrid.toString());
+    formData.append("song_start_sec", songStartSec.toString());
 
     try {
       setSongUploading(true);
@@ -371,7 +376,7 @@ export default function ExploreScreen() {
     if (song && !songUploading && !songUploaded) {
       uploadSongFile();
     }
-  }, [uiLocked, song, duration, density, aggressiveness, focusBass, focusVocals, focusRepetitions, syncToGrid]);
+  }, [uiLocked, song, duration, songStartSec, density, aggressiveness, focusBass, focusVocals, focusRepetitions, syncToGrid]);
 
   useEffect(() => {
     if (showMusicModal) loadMusicLibrary();
@@ -424,6 +429,7 @@ export default function ExploreScreen() {
   useEffect(() => {
     // song changed
     setAnalyzeResult(null);
+    setSongStartSec(0);
   }, [song?.uri]);
 
   async function createPreview() {
@@ -445,6 +451,7 @@ export default function ExploreScreen() {
     setGenerateLoading(true);
     try {
       const body: Record<string, unknown> = song?.name ? { song_filename: song.name } : {};
+      body.song_start_sec = songStartSec;
       // Send tap_mode explicitly so the backend never reads a stale options.json value.
       body.tap_mode = tapMode ?? null;
       console.log("[TRACE] createPreview: sending POST /analyze", {
@@ -476,6 +483,7 @@ export default function ExploreScreen() {
         bpm: data.bpm,
         cut_points: data.cut_points || [],
         segments: data.segments || [],
+        song_start_sec: songStartSec,
       });
       setMediaListForPreview(
         mediaList.map((m) => ({
@@ -523,6 +531,7 @@ export default function ExploreScreen() {
       bpm: 0,
       cut_points: [],
       segments,
+      song_start_sec: 0,
     });
     setMediaListForPreview(
       mediaList.map((m) => ({
@@ -1243,7 +1252,51 @@ export default function ExploreScreen() {
               </TouchableOpacity>
             ))}
           </View>
+
+          <TouchableOpacity
+            style={[styles.songSectionButton, (!song || uiLocked) && styles.buttonDisabled]}
+            disabled={!song || uiLocked}
+            onPress={() => {
+              if (!song || uiLocked) return;
+              setShowSongRangeModal(true);
+            }}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="musical-notes-outline" size={20} color={song && !uiLocked ? "#4338ca" : "#94a3b8"} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.songSectionButtonTitle}>Where in the song</Text>
+              <Text style={styles.songSectionButtonSub}>
+                {song
+                  ? `Analyzing from ${Math.floor(songStartSec / 60)}:${Math.floor(songStartSec % 60)
+                      .toString()
+                      .padStart(2, "0")} · ${duration}s window`
+                  : "Pick a song first"}
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#94a3b8" />
+          </TouchableOpacity>
         </View>
+
+        <SongRangePickerModal
+          visible={showSongRangeModal}
+          onClose={() => setShowSongRangeModal(false)}
+          songUri={song?.uri ?? ""}
+          windowDurationSec={duration}
+          initialStartSec={songStartSec}
+          onConfirm={async (start) => {
+            setSongStartSec(start);
+            setSongUploaded(false);
+            try {
+              await fetch(`${SERVER_URL}/api/options`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ song_start_sec: start }),
+              });
+            } catch {
+              // upload will still send song_start_sec
+            }
+          }}
+        />
 
         
 
@@ -1797,6 +1850,27 @@ const styles = StyleSheet.create({
   nameTrackCancelBtnText: { fontSize: 15, fontWeight: "600", color: "#64748b" },
   nameTrackSaveBtn: { backgroundColor: "#6366f1", paddingVertical: 12, paddingHorizontal: 24, borderRadius: 12, minWidth: 88, alignItems: "center" },
   nameTrackSaveBtnText: { fontSize: 15, fontWeight: "700", color: "#fff" },
+  songSectionButton: {
+    marginTop: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#eef2ff",
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: "#c7d2fe",
+  },
+  songSectionButtonTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#312e81",
+  },
+  songSectionButtonSub: {
+    fontSize: 12,
+    color: "#6366f1",
+    marginTop: 2,
+  },
   durationRow: {
     flexDirection: "row",
     gap: 12,

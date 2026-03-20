@@ -316,7 +316,8 @@ async def upload_song(
     focus_bass: str = Form("true"),
     focus_vocals: str = Form("true"),
     focus_repetitions: str = Form("true"),
-    sync_to_grid: str = Form("false")
+    sync_to_grid: str = Form("false"),
+    song_start_sec: str = Form("0"),
 ):
     """Upload song without compression"""
     # Clear previous song
@@ -335,6 +336,10 @@ async def upload_song(
     
     # Save options.json (AI reads minClipDuration/maxClipDuration for segment generation)
     existing_options = _read_json_file(Path("uploads/options.json"), {})
+    try:
+        _song_start = float(song_start_sec or 0)
+    except ValueError:
+        _song_start = 0.0
     options_data = {
         "max_duration": int(max_duration),
         "density": density,
@@ -344,6 +349,7 @@ async def upload_song(
         "focus_repetitions": parse_bool(focus_repetitions),
         "sync_to_grid": parse_bool(sync_to_grid),
         "song_filename": song.filename,
+        "song_start_sec": max(0.0, _song_start),
         "minClipDuration": 0.1,
         "maxClipDuration": None,
         "tap_mode": existing_options.get("tap_mode"),
@@ -373,7 +379,8 @@ async def upload_media(
     focus_bass: str = Form("true"),
     focus_vocals: str = Form("true"),
     focus_repetitions: str = Form("true"),
-    sync_to_grid: str = Form("false")
+    sync_to_grid: str = Form("false"),
+    song_start_sec: str = Form("0"),
 ):
     shutil.rmtree(MEDIA_DIR, ignore_errors=True)
     shutil.rmtree("uploads/songs", ignore_errors=True)
@@ -419,6 +426,10 @@ async def upload_media(
 
     # Save options.json with all parameters
     existing_options = _read_json_file(Path("uploads/options.json"), {})
+    try:
+        _song_start_u = float(song_start_sec or 0)
+    except ValueError:
+        _song_start_u = 0.0
     options_data = {
         "max_duration": int(max_duration),
         "density": density,
@@ -427,6 +438,7 @@ async def upload_media(
         "focus_vocals": parse_bool(focus_vocals),
         "focus_repetitions": parse_bool(focus_repetitions),
         "sync_to_grid": parse_bool(sync_to_grid),
+        "song_start_sec": max(0.0, _song_start_u),
     }
     if song_saved:
         options_data["song_filename"] = song_saved
@@ -645,9 +657,18 @@ async def analyze_only(body: Optional[dict] = Body(None)):
                     else:
                         print("[TRACE] requested_song not in folder, options unchanged; requested:", requested_song)
         print("[TRACE] options.json AFTER lock:", {k: v for k, v in options.items()})
+        if body and body.get("song_start_sec") is not None:
+            try:
+                options["song_start_sec"] = max(0.0, float(body["song_start_sec"]))
+            except (TypeError, ValueError):
+                options["song_start_sec"] = 0.0
+            with open(options_file, "w") as f:
+                json.dump(options, f, indent=2)
+            print("[TRACE] merged body.song_start_sec into options:", options.get("song_start_sec"))
         max_duration = int(options.get("max_duration", 60))
         env = os.environ.copy()
         env["MAX_DURATION"] = str(max_duration)
+        env["SONG_START_SEC"] = str(float(options.get("song_start_sec", 0) or 0))
         # Prefer request tap_mode over options.json to avoid stale mode.
         requested_tap_mode = (body or {}).get("tap_mode", None)
         if requested_tap_mode in ("verbatim", "calibrate"):
@@ -769,6 +790,7 @@ async def export_video(body: Optional[dict] = Body(None)):
         with open(Path("uploads/options.json")) as f:
             opts = json.load(f)
         env["MAX_DURATION"] = str(opts.get("max_duration", 60))
+        env["SONG_START_SEC"] = str(float(opts.get("song_start_sec", 0) or 0))
         final_videos_path = Path("uploads/final_videos")
         mtime_before = None
         if final_videos_path.exists():

@@ -14,6 +14,8 @@ export interface AnalyzeResult {
   bpm: number;
   cut_points: unknown[];
   segments: SegmentSpec[];
+  /** Offset in the full audio file matching the analyzed window (seconds). */
+  song_start_sec?: number;
 }
 
 export interface MediaItemForPreview {

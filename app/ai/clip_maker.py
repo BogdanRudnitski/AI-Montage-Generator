@@ -356,8 +356,9 @@ def compute_segments_only(cut_points, duration, clip_manager, max_duration=None,
 
 
 def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, max_duration=None, precomputed_segments=None,
-                          min_clip_duration=DEFAULT_MIN_CLIP_DURATION, max_clip_duration=None):
-    """Create video using direct ffmpeg concat. Duration rules from options: min_clip_duration, max_clip_duration (optional)."""
+                          min_clip_duration=DEFAULT_MIN_CLIP_DURATION, max_clip_duration=None, song_start_sec=0.0):
+    """Create video using direct ffmpeg concat. Duration rules from options: min_clip_duration, max_clip_duration (optional).
+    song_start_sec: trim the muxed audio from this offset in the source file (must match analyze window)."""
     print("\nCreating video (ultra fast)...")
     print(f"   Audio: {os.path.basename(audio_path)}")
     print(f"   Cut points: {len(cut_points)}")
@@ -367,6 +368,8 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
     
     # Fast duration detection (no full decode)
     full_duration = get_media_duration(audio_path)
+    song_start_sec = max(0.0, float(song_start_sec or 0.0))
+    available_after_start = max(0.0, full_duration - song_start_sec)
     
     # Build list of segment specs: either from precomputed_segments or from cut_points + clip_manager
     segment_specs = []
@@ -388,21 +391,28 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
                 'clip_duration': in_clip_duration,
             })
         print(f"Using {len(segment_specs)} precomputed segments...")
-        # Duration = end time of last segment (user's edit), capped by audio length
-        duration_from_segments = precomputed_segments[-1]['endTime']
-        duration = min(duration_from_segments, full_duration)
-        print(f"   Duration from segments: {duration_from_segments:.2f}s (capped by audio: {duration:.2f}s)")
-        if duration < full_duration:
-            # Trim audio without decoding to memory (fast, single stream)
+        # Duration = end time of last segment (user's edit), capped by audio in [song_start, end)
+        duration_from_segments = float(precomputed_segments[-1]['endTime'])
+        duration = min(duration_from_segments, available_after_start)
+        print(
+            f"   Duration from segments: {duration_from_segments:.2f}s "
+            f"(capped by window {available_after_start:.2f}s → {duration:.2f}s)"
+        )
+        if duration <= 0:
+            raise RuntimeError("Selected song window has no audio — adjust song start or video length.")
+        use_whole_file = song_start_sec <= 1e-3 and duration + 0.05 >= full_duration
+        if not use_whole_file:
             temp_audio = "temp_trimmed_audio.m4a"
             _run_ffmpeg(
                 [
                     "ffmpeg",
                     "-y",
-                    "-t",
-                    str(duration),
+                    "-ss",
+                    str(song_start_sec),
                     "-i",
                     audio_path,
+                    "-t",
+                    str(duration),
                     "-vn",
                     "-c:a",
                     "aac",
@@ -413,39 +423,43 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
                 step_name="trim audio",
             )
             audio_path = temp_audio
-            print(f"   Audio trimmed to {duration:.2f}s\n")
+            print(f"   Audio excerpt {song_start_sec:.2f}s–{song_start_sec + duration:.2f}s → mux ({duration:.2f}s)\n")
         else:
-            print(f"   Duration: {duration:.2f}s\n")
+            print(f"   Duration: {duration:.2f}s (full file from 0)\n")
     else:
         # Apply max duration limit when not using precomputed segments
         if max_duration and max_duration > 0:
-            duration = min(max_duration, full_duration)
-            if duration < full_duration:
-                temp_audio = "temp_trimmed_audio.m4a"
-                _run_ffmpeg(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-t",
-                        str(duration),
-                        "-i",
-                        audio_path,
-                        "-vn",
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        "192k",
-                        temp_audio,
-                    ],
-                    step_name="trim audio",
-                )
-                audio_path = temp_audio
-                print(f"   Generating {duration:.2f}s video (trimmed from {full_duration:.2f}s)\n")
-            else:
-                print(f"   Duration: {duration:.2f}s\n")
+            duration = min(float(max_duration), available_after_start)
         else:
-            duration = full_duration
-            print(f"   Duration: {duration:.2f}s\n")
+            duration = available_after_start
+        if duration <= 0:
+            raise RuntimeError("Selected song window has no audio — adjust song start or video length.")
+        use_whole_file = song_start_sec <= 1e-3 and duration + 0.05 >= full_duration
+        if not use_whole_file:
+            temp_audio = "temp_trimmed_audio.m4a"
+            _run_ffmpeg(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    str(song_start_sec),
+                    "-i",
+                    audio_path,
+                    "-t",
+                    str(duration),
+                    "-vn",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    temp_audio,
+                ],
+                step_name="trim audio",
+            )
+            audio_path = temp_audio
+            print(f"   Audio excerpt {song_start_sec:.2f}s–{song_start_sec + duration:.2f}s ({duration:.2f}s)\n")
+        else:
+            print(f"   Duration: {duration:.2f}s (full file from 0)\n")
         cut_points = [p for p in cut_points if p['timestamp'] < duration]
         timestamps = [{'timestamp': 0, 'type': 'start', 'score': 0}] + cut_points + [{'timestamp': duration, 'type': 'end', 'score': 0}]
         timestamps = _split_long_segments(timestamps, max_clip_duration)
@@ -686,6 +700,7 @@ def main():
     target_song = None
     min_clip_duration = DEFAULT_MIN_CLIP_DURATION
     max_clip_duration = None
+    song_start_sec = 0.0
     if os.path.exists(options_file):
         try:
             with open(options_file, 'r') as f:
@@ -694,12 +709,16 @@ def main():
                 min_clip_duration = float(options.get('minClipDuration', min_clip_duration))
                 if options.get('maxClipDuration') is not None:
                     max_clip_duration = float(options['maxClipDuration'])
+                song_start_sec = float(options.get('song_start_sec', 0) or 0)
                 print("Loaded options from options.json")
                 if target_song:
                     print(f"   Target song: {target_song}")
-                print(f"   minClipDuration: {min_clip_duration}s, maxClipDuration: {max_clip_duration or 'none'}\n")
+                print(f"   minClipDuration: {min_clip_duration}s, maxClipDuration: {max_clip_duration or 'none'}")
+                print(f"   song_start_sec: {song_start_sec}s\n")
         except Exception as e:
             print(f"Error reading options.json: {e}\n")
+    if 'SONG_START_SEC' in os.environ:
+        song_start_sec = max(0.0, float(os.environ.get('SONG_START_SEC') or 0))
     
     # Export-only path: segments.json was written by POST /export; use it without requiring audio_analysis.json
     precomputed_segments = None
@@ -741,6 +760,7 @@ def main():
                 precomputed_segments=precomputed_segments,
                 min_clip_duration=min_clip_duration,
                 max_clip_duration=max_clip_duration,
+                song_start_sec=song_start_sec,
             )
             print("="*60)
             print(f"Video created in '{OUTPUT_FOLDER}'!")
@@ -879,6 +899,7 @@ def main():
             precomputed_segments=precomputed_segments,
             min_clip_duration=min_clip_duration,
             max_clip_duration=max_clip_duration,
+            song_start_sec=song_start_sec,
         )
         
         # Reset clip usage
