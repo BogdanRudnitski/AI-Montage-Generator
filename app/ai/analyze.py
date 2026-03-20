@@ -47,27 +47,33 @@ def load_taps(song_filename):
     return [float(c['timestamp']) for c in data.get('manual_cuts', [])]
 
 def taps_to_cut_points(tap_timestamps, max_duration, song_start_sec=0.0):
-    """Map absolute tap times into cut_points relative to the analysis window."""
-    end_abs = song_start_sec + float(max_duration if max_duration else 1e9)
-    rel_times = []
-    for t in sorted(float(x) for x in tap_timestamps):
-        if t < song_start_sec - 1e-6:
+    """Return tap timestamps as cut_points in the standard output schema.
+
+    Tap files store absolute times in the full song. Cut points in the analyze
+    output are relative to the selected window [song_start_sec, song_start_sec + max_duration).
+    """
+    start = max(0.0, float(song_start_sec or 0.0))
+    window = float(max_duration) if max_duration is not None else float("inf")
+    out = []
+    for t in sorted(tap_timestamps):
+        t = float(t)
+        if t < start - 1e-6:
             continue
-        if t >= end_abs - 1e-6:
+        rel = t - start
+        if rel < -1e-6 or rel > window + 1e-6:
             continue
-        rel_times.append(t - song_start_sec)
-    return [
-        {
-            'timestamp':      float(t),
-            'score':          100,
-            'type':           'manual_tap',
-            'strength':       1.0,
-            'on_grid':        False,
-            'description':    'Manual Tap',
-            'repetition_gap': None,
-        }
-        for t in rel_times
-    ]
+        out.append(
+            {
+                "timestamp": float(rel),
+                "score": 100,
+                "type": "manual_tap",
+                "strength": 1.0,
+                "on_grid": False,
+                "description": "Manual Tap",
+                "repetition_gap": None,
+            }
+        )
+    return out
 
 # ─── Calibration helpers ──────────────────────────────────────────────────────
 
@@ -89,7 +95,9 @@ def apply_calibration_to_preset(preset, calibration, song_key):
         result['min_distance']    = cal['min_distance']
     if 'score_threshold' in cal:
         result['score_threshold'] = cal['score_threshold']
-    return result, cal.get('type_bonuses', {})
+
+    density_profile = cal.get('density_profile', [])
+    return result, cal.get('type_bonuses', {}), density_profile
 
 # ─── DSP helpers ──────────────────────────────────────────────────────────────
 
@@ -200,18 +208,25 @@ def detect_vocal_transients(vocal_audio, sr, hop_length=512):
     filtered  = bandpass_filter(vocal_audio, 1000, 4000, sr)
     onset     = compute_onset_strength(filtered, sr, hop_length)
 
-    # Normalize so strength is comparable across songs
     onset_max = np.max(onset) if np.max(onset) > 0 else 1.0
     onset_n   = onset / onset_max
+    times     = librosa.frames_to_time(np.arange(len(onset_n)), sr=sr, hop_length=hop_length)
 
-    # Tight threshold — only genuine punchy hits (top ~7% of frames)
-    threshold   = np.mean(onset_n) + 1.5 * np.std(onset_n)
-    times       = librosa.frames_to_time(np.arange(len(onset_n)), sr=sr, hop_length=hop_length)
-    peaks, props = find_peaks(onset_n, height=threshold,
+    # Adaptive local threshold: each frame is judged against its local neighbourhood
+    # (±2s window) so quiet-intro peaks aren't suppressed by the loud section's mean.
+    window_frames = int(2.0 * sr / hop_length)
+    local_thresh  = np.zeros_like(onset_n)
+    for i in range(len(onset_n)):
+        lo = max(0, i - window_frames)
+        hi = min(len(onset_n), i + window_frames)
+        region = onset_n[lo:hi]
+        local_thresh[i] = np.mean(region) + 1.2 * np.std(region)
+
+    # A peak must exceed its local threshold AND have meaningful prominence
+    peaks, props = find_peaks(onset_n, height=local_thresh,
                               distance=int(0.25 * sr / hop_length),
-                              prominence=np.std(onset_n) * 0.8)
+                              prominence=np.std(onset_n) * 0.4)
     return times[peaks], props['peak_heights']
-
 
 def detect_bass_drops(bass_audio, sr, hop_length=512):
     """
@@ -390,31 +405,157 @@ def score_cut_point(event, beat_times, grid_times, pattern_changes, bar_length,
     if event['type'] == 'vocal_repetition' and event.get('gap', 1.0) < 0.5:
         score += 10
 
-    # Drum prominence context: when kick is dominant, boost drum_low and suppress rest
+    # ── Context-aware boosting ────────────────────────────────────────────────
     is_drum_low = event['type'] == 'drum_low'
-    if drum_low_prominence > 0.4:
+    is_vocal    = event['type'] in ('vocal_transient', 'vocal_repetition')
+    is_bass     = event['type'] == 'bass_drop'
+    bass_active = bass_activity_at_time
+
+    # Determine what's dominant right now
+    beat_dominant = drum_low_prominence > 0.4
+    bass_dominant = focus_bass and bass_active > 0.35
+    quiet_section = bass_active < 0.15 and drum_low_prominence < 0.35
+
+    if quiet_section:
+        # Nothing driving rhythm — vocals are the primary signal
+        if is_vocal:
+            score += 35  # strong boost so they clear threshold easily
+        elif is_drum_low or is_bass:
+            score += 10  # still show weak rhythmic hints if present
+
+    elif bass_dominant and not beat_dominant:
+        # Bass is the driver
+        if is_bass:
+            score += bass_active * 35
+        elif is_drum_low:
+            pass  # kick coexists with bass, no penalty
+        elif is_vocal:
+            score -= bass_active * 10  # light suppression only
+        else:
+            score -= bass_active * 30  # suppress pattern_change etc
+
+    elif beat_dominant and not bass_dominant:
+        # Kick is the driver
         if is_drum_low:
             score += drum_low_prominence * 30
-        elif event['type'] not in ('bass_drop',):
-            score -= drum_low_prominence * 20
+        elif is_bass:
+            pass  # bass coexists with kick
+        elif is_vocal:
+            pass  # vocals still allowed alongside kick
+        else:
+            score -= drum_low_prominence * 15
 
-    # Bass context: boost bass events when bass is active, suppress others
-    if focus_bass:
-        is_bass     = event['type'] == 'bass_drop'
-        bass_active = bass_activity_at_time
-
-        if is_bass and bass_active > 0.2:
+    elif bass_dominant and beat_dominant:
+        # Both driving — bass + kick dominate, vocals suppressed
+        if is_bass:
             score += bass_active * 35
-        elif not is_bass and not is_drum_low and bass_active > 0.35:
-            score -= bass_active * 35
-        elif not is_bass and bass_active < 0.15 and drum_low_prominence < 0.4:
-            score += 12
+        elif is_drum_low:
+            score += drum_low_prominence * 20
+        elif is_vocal:
+            score -= 15  # vocals clearly secondary when beat + bass both pumping
+        else:
+            score -= 25
 
     # Calibration type bonus
     if type_bonuses:
         score += type_bonuses.get(event['type'], 0)
 
     return min(int(score), 100)
+
+def generate_all_candidates(audio_path, max_duration=None, song_start_sec=0.0,
+                            focus_bass=True, focus_vocals=True, focus_repetitions=True):
+    """
+    Run stem separation + detection and return a flat list of all scored candidates.
+    Used by both analyze_audio_advanced and calibrate.py (as fallback when
+    all_candidates isn't already in audio_analysis.json).
+    Each entry: {timestamp, score, type, strength, kept=False}
+    'kept' is always False here — caller decides threshold.
+    """
+    import torch
+    from demucs import pretrained
+    from demucs.apply import apply_model
+
+    song_start_sec = max(0.0, float(song_start_sec or 0.0))
+    full_duration  = float(librosa.get_duration(path=audio_path))
+    song_start_sec = min(song_start_sec, max(0.0, full_duration - 0.01))
+    load_duration  = float(max_duration) if (max_duration and max_duration > 0) else None
+
+    wav_np, sr = librosa.load(audio_path, sr=22050, mono=False,
+                              offset=song_start_sec, duration=load_duration)
+    if wav_np.ndim == 2 and wav_np.shape[1] <= 4 < wav_np.shape[0]:
+        wav_np = np.ascontiguousarray(wav_np.T)
+    if wav_np.ndim == 1:
+        wav_np = np.stack([wav_np, wav_np])
+    elif wav_np.shape[0] == 1:
+        wav_np = np.vstack([wav_np, wav_np])
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model  = pretrained.get_model('htdemucs')
+    model.to(device).eval()
+    with torch.no_grad():
+        sources = apply_model(model, torch.from_numpy(wav_np).float().unsqueeze(0).to(device), device=device)[0]
+
+    drum_mono  = np.mean(sources[0].cpu().numpy(), axis=0)
+    bass_mono  = np.mean(sources[1].cpu().numpy(), axis=0)
+    vocal_mono = np.mean(sources[3].cpu().numpy(), axis=0)
+
+    tempo, beat_times, grid_times = estimate_bpm_and_beats(drum_mono, sr)
+    drum_onsets, _   = detect_multiband_onsets(drum_mono, sr)
+    drum_low_prom    = compute_drum_low_prominence(drum_mono, sr)
+    pattern_changes  = detect_drum_pattern_changes(drum_mono, sr)
+
+    vocal_times, vocal_strengths = (detect_vocal_transients(vocal_mono, sr)
+                                    if focus_vocals else (np.array([]), np.array([])))
+    if focus_vocals and len(vocal_strengths) > 0 and np.max(vocal_strengths) > 0:
+        v_ref = np.percentile(vocal_strengths, 95)
+        vocal_strengths = np.clip(vocal_strengths / max(v_ref, 1e-9), 0.0, 1.0)
+
+    vocal_reps = detect_vocal_repetitions(vocal_mono, sr) if focus_repetitions else []
+    bass_drops = detect_bass_drops(bass_mono, sr) if focus_bass else []
+    bass_activity_times, bass_activity_rms = (
+        compute_bass_activity(bass_mono, sr) if focus_bass
+        else (np.array([0.0]), np.array([0.0]))
+    )
+
+    candidates = []
+    for band in ['low', 'mid', 'high']:
+        strengths = drum_onsets[band]['strengths']
+        s_max = np.max(strengths) if len(strengths) > 0 and np.max(strengths) > 0 else 1.0
+        for t, s in zip(drum_onsets[band]['times'], strengths):
+            candidates.append({'time': t, 'strength': float(s / s_max), 'type': f'drum_{band}', 'multi_band': 0})
+    for t, s in zip(vocal_times, vocal_strengths):
+        candidates.append({'time': t, 'strength': float(s), 'type': 'vocal_transient', 'multi_band': 0})
+    for rep in vocal_reps:
+        candidates.append({'time': rep['time'], 'strength': rep['strength'],
+                           'type': 'vocal_repetition', 'multi_band': 0, 'gap': rep.get('gap', 0)})
+    for drop in bass_drops:
+        candidates.append({'time': drop['time'], 'strength': drop['intensity'], 'type': 'bass_drop', 'multi_band': 0})
+    for change in pattern_changes:
+        candidates.append({'time': change['time'], 'strength': change['distance'], 'type': 'pattern_change', 'multi_band': 0})
+
+    for c in candidates:
+        c['multi_band'] = sum(
+            1 for band in ['low', 'mid', 'high']
+            if np.any(np.abs(drum_onsets[band]['times'] - c['time']) < 0.03)
+        ) / 3.0
+
+    bar_length = (60.0 / tempo) * 4 if tempo > 0 else 4.0
+    result = []
+    for c in candidates:
+        bass_at_t = float(np.interp(c['time'], bass_activity_times, bass_activity_rms))
+        score = score_cut_point(c, beat_times, grid_times, pattern_changes, bar_length,
+                                bass_activity_at_time=bass_at_t, focus_bass=focus_bass,
+                                drum_low_prominence=drum_low_prom)
+        result.append({
+            'timestamp': float(c['time']),
+            'score':     int(score),
+            'type':      c['type'],
+            'strength':  float(c['strength']),
+            'kept':      False,
+        })
+    result.sort(key=lambda x: x['timestamp'])
+    return result, float(wav_np.shape[1] / sr)
+
 
 # ─── Main analysis ────────────────────────────────────────────────────────────
 
@@ -435,9 +576,9 @@ def analyze_audio_advanced(
     tap_mode='verbatim' → use tap timestamps directly, skip AI
     tap_mode='calibrate'→ run AI analysis but apply calibration.json learnt from taps
     """
-    script_dir    = os.path.dirname(os.path.abspath(__file__))
+    script_dir   = os.path.dirname(os.path.abspath(__file__))
     song_filename = os.path.basename(audio_path)
-    song_key      = os.path.splitext(song_filename)[0]
+    song_key     = os.path.splitext(song_filename)[0]
 
     print(f"\n{'='*60}")
     print(f"🎵 Analyzing: {song_filename}")
@@ -447,33 +588,26 @@ def analyze_audio_advanced(
     print(f"⚙️  Settings: density={density}, aggressiveness={aggressiveness:.1f}")
     if max_duration:
         print(f"   Max duration: {max_duration}s\n")
-    song_start_sec = max(0.0, float(song_start_sec or 0.0))
-    if song_start_sec > 0:
-        print(f"   Song start offset: {song_start_sec:.2f}s\n")
 
-    # ── Load only the analysis window (offset + max_duration) ────────────────
+    # ── Load only the selected window [song_start_sec, +max_duration) ────────
+    song_start_sec = max(0.0, float(song_start_sec or 0.0))
     full_duration = float(librosa.get_duration(path=audio_path))
-    if not np.isfinite(full_duration) or full_duration <= 0:
-        full_duration = 0.01
     song_start_sec = min(song_start_sec, max(0.0, full_duration - 0.01))
-    load_duration  = float(max_duration) if (max_duration and max_duration > 0) else None
+    load_seconds = float(max_duration) if (max_duration and max_duration > 0) else None
+
+    print(f"   Window: start={song_start_sec:.2f}s  (full track {full_duration:.2f}s)\n")
 
     wav_np, sr = librosa.load(
-        audio_path,
-        sr=22050,
-        mono=False,
-        offset=song_start_sec,
-        duration=load_duration,
+        audio_path, sr=22050, mono=False, offset=song_start_sec, duration=load_seconds
     )
-    if wav_np.ndim == 2 and wav_np.shape[1] <= 4 < wav_np.shape[0]:
-        wav_np = np.ascontiguousarray(wav_np.T)
     if wav_np.ndim == 1:
         wav_np = np.stack([wav_np, wav_np])
     elif wav_np.shape[0] == 1:
         wav_np = np.vstack([wav_np, wav_np])
 
     duration = float(wav_np.shape[1] / sr)
-    print(f"   ⏱️  Window: {duration:.2f}s (from {song_start_sec:.2f}s in {full_duration:.2f}s total)\n")
+
+    print(f"   ⏱️  {duration:.2f}s analyzed (segment 0–{duration:.2f}s maps to file {song_start_sec:.2f}–{song_start_sec + duration:.2f}s)\n")
 
     # ── VERBATIM TAP MODE ─────────────────────────────────────────────────────
     if tap_mode == 'verbatim':
@@ -485,13 +619,14 @@ def analyze_audio_advanced(
             cut_points = taps_to_cut_points(taps, max_duration or duration, song_start_sec=song_start_sec)
             print(f"✅ Using {len(cut_points)} manual taps verbatim\n")
 
+            # Still get BPM from drums for metadata
             mono = np.mean(wav_np, axis=0)
             onset_env = librosa.onset.onset_strength(y=mono, sr=sr)
             tempo_r, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
             tempo      = float(np.atleast_1d(tempo_r)[0])
             beat_times = librosa.frames_to_time(beats, sr=sr).tolist()[:20]
 
-            return _build_result(song_filename, cut_points, duration, full_duration,
+            return _build_result(song_filename, cut_points, [], duration, full_duration,
                                  max_duration, tempo, beat_times, len(taps),
                                  density, aggressiveness, focus_bass, focus_vocals,
                                  focus_repetitions, sync_to_grid, song_start_sec)
@@ -525,8 +660,13 @@ def analyze_audio_advanced(
     vocal_times, vocal_strengths = (detect_vocal_transients(vocal_mono, sr)
                                     if focus_vocals else (np.array([]), np.array([])))
     if focus_vocals:
+        # Normalize to 95th-percentile so quiet-section peaks aren't crushed
+        # by one loud section pulling max up
         if len(vocal_strengths) > 0 and np.max(vocal_strengths) > 0:
-            vocal_strengths = vocal_strengths / np.max(vocal_strengths)
+            v_ref = np.percentile(vocal_strengths, 95)
+            if v_ref < 1e-9:
+                v_ref = np.max(vocal_strengths)
+            vocal_strengths = np.clip(vocal_strengths / v_ref, 0.0, 1.0)
         print(f"🎤 Vocal transients: {len(vocal_times)}\n")
 
     vocal_reps = detect_vocal_repetitions(vocal_mono, sr) if focus_repetitions else []
@@ -537,6 +677,7 @@ def analyze_audio_advanced(
     if focus_bass:
         print(f"🎸 Bass events: {len(bass_drops)}\n")
 
+    # Bass activity envelope — used to contextually boost/suppress scores
     bass_activity_times, bass_activity_rms = (
         compute_bass_activity(bass_mono, sr) if focus_bass
         else (np.array([0.0]), np.array([0.0]))
@@ -574,16 +715,18 @@ def analyze_audio_advanced(
         ) / 3.0
 
     # ── Load calibration if in calibrate mode ─────────────────────────────────
-    type_bonuses = {}
-    preset       = dict(DENSITY_PRESETS[density])
+    type_bonuses    = {}
+    density_profile = None
+    preset          = dict(DENSITY_PRESETS[density])
 
     if tap_mode == 'calibrate':
         calibration = load_calibration(script_dir)
         if calibration:
-            preset, type_bonuses = apply_calibration_to_preset(preset, calibration, song_key)
+            preset, type_bonuses, density_profile = apply_calibration_to_preset(preset, calibration, song_key)
             print(f"🎯 Calibration loaded — min_dist={preset['min_distance']}  "
                   f"threshold={preset['score_threshold']}  "
-                  f"type_bonuses={type_bonuses}\n")
+                  f"type_bonuses={type_bonuses}  "
+                  f"density_windows={len(density_profile) if density_profile else 0}\n")
         else:
             print("⚠️  No calibration.json found — running uncalibrated AI analysis.\n")
 
@@ -617,15 +760,39 @@ def analyze_audio_advanced(
         })
 
     scored.sort(key=lambda x: x['timestamp'])
+
+    # ── Local-density-aware deduplication ─────────────────────────────────────
+    # If calibration has a density_profile, use per-window min_distance.
+    # Otherwise fall back to global preset min_distance.
+    def local_min_distance(t):
+        if not density_profile:
+            return preset['min_distance']
+        for window in density_profile:
+            if window['start'] <= t < window['end']:
+                return window['min_distance']
+        return preset['min_distance']
+
     deduped = []
     for c in scored:
-        if not deduped or (c['timestamp'] - deduped[-1]['timestamp']) >= preset['min_distance']:
+        min_d = local_min_distance(c['timestamp'])
+        if not deduped or (c['timestamp'] - deduped[-1]['timestamp']) >= min_d:
             deduped.append(c)
         elif c['score'] > deduped[-1]['score']:
             deduped[-1] = c
 
     max_cuts = preset['max_cuts']
-    if len(deduped) > max_cuts:
+    if density_profile and len(deduped) > 0:
+        # Keep up to target_cuts per window, picking highest scores
+        filtered = []
+        for window in density_profile:
+            window_cuts = [c for c in deduped
+                           if window['start'] <= c['timestamp'] < window['end']]
+            target = window.get('target_cuts', max_cuts)
+            if len(window_cuts) > target:
+                window_cuts = sorted(window_cuts, key=lambda x: -x['score'])[:target]
+                window_cuts.sort(key=lambda x: x['timestamp'])
+            filtered.extend(window_cuts)
+    elif len(deduped) > max_cuts:
         bucket_w = duration / max_cuts
         buckets  = [[] for _ in range(max_cuts)]
         for c in deduped:
@@ -640,16 +807,35 @@ def analyze_audio_advanced(
 
     print(f"✅ Generated {len(filtered)} cut points\n")
 
-    return _build_result(song_filename, filtered, duration, full_duration,
-                         max_duration, tempo, beat_times[:20].tolist() if hasattr(beat_times, 'tolist') else list(beat_times)[:20],
+    # Save all scored candidates (not just kept ones) so calibrate.py can
+    # match taps against the full pool and compute real false positives / misses
+    all_scored = []
+    for c in candidates:
+        bass_at_t = float(np.interp(c['time'], bass_activity_times, bass_activity_rms))
+        s = score_cut_point(c, beat_times, grid_times, pattern_changes,
+                            bar_length, type_bonuses,
+                            bass_activity_at_time=bass_at_t,
+                            focus_bass=focus_bass,
+                            drum_low_prominence=drum_low_prominence)
+        all_scored.append({
+            'timestamp': float(c['time']),
+            'score':     int(s),
+            'type':      c['type'],
+            'strength':  float(c['strength']),
+            'kept':      s >= adjusted_threshold,
+        })
+    all_scored.sort(key=lambda x: x['timestamp'])
+
+    return _build_result(song_filename, filtered, all_scored, duration, full_duration,
+                         max_duration, tempo,
+                         beat_times[:20].tolist() if hasattr(beat_times, 'tolist') else list(beat_times)[:20],
                          len(candidates), density, aggressiveness,
                          focus_bass, focus_vocals, focus_repetitions, sync_to_grid, song_start_sec)
 
 
-def _build_result(song_filename, cut_points, duration, full_duration, max_duration,
+def _build_result(song_filename, cut_points, all_candidates, duration, full_duration, max_duration,
                   tempo, beat_times, total_candidates, density, aggressiveness,
-                  focus_bass, focus_vocals, focus_repetitions, sync_to_grid,
-                  song_start_sec=0.0):
+                  focus_bass, focus_vocals, focus_repetitions, sync_to_grid, song_start_sec=0.0):
     return {
         'last_analyzed':    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'duration':         float(duration),
@@ -660,6 +846,7 @@ def _build_result(song_filename, cut_points, duration, full_duration, max_durati
         'beat_times':       [float(t) for t in beat_times],
         'total_candidates': total_candidates,
         'cut_points':       cut_points,
+        'all_candidates':   all_candidates,   # full scored pool for calibrate.py
         'settings': {
             'density':            density,
             'aggressiveness':     aggressiveness,
@@ -690,7 +877,7 @@ def main():
                    if f.lower().endswith(('.mp3', '.wav', '.m4a'))
                    or ('.' not in f and not f.startswith('.'))]
     if not audio_files:
-        print(f"❌ No audio files in '{AUDIO_FOLDER}'\n")
+        print(f"No audio files in '{AUDIO_FOLDER}'\n")
         return
 
     # Defaults
@@ -701,7 +888,8 @@ def main():
     focus_vocals      = True
     focus_repetitions = True
     sync_to_grid      = False
-    tap_mode          = None
+    tap_mode          = None   # None | 'verbatim' | 'calibrate'
+    song_start_sec    = 0.0
 
     if os.path.exists(options_file):
         try:
@@ -714,26 +902,21 @@ def main():
             focus_vocals      = opts.get('focus_vocals', focus_vocals)
             focus_repetitions = opts.get('focus_repetitions', focus_repetitions)
             sync_to_grid      = opts.get('sync_to_grid', sync_to_grid)
-            tap_mode          = opts.get('tap_mode', tap_mode)
+            tap_mode          = opts.get('tap_mode', tap_mode)  # 'verbatim' | 'calibrate' | null
+            song_start_sec    = float(opts.get('song_start_sec', 0) or 0)
             print(f"📋 Options loaded  tap_mode={tap_mode}  density={density}  aggressiveness={aggressiveness}")
         except Exception as e:
             print(f"⚠️  options.json error: {e} — using defaults")
 
-    # Prefer options.json, then env override
-    song_start_sec = 0.0
+    # Backend sets SONG_START_SEC for each /analyze request (authoritative).
     try:
-        with open(options_file) as f:
-            _o = json.load(f)
-        song_start_sec = float(_o.get('song_start_sec', 0) or 0)
-    except Exception:
+        _env_start = os.environ.get("SONG_START_SEC")
+        if _env_start is not None and str(_env_start).strip() != "":
+            song_start_sec = max(0.0, float(_env_start))
+    except (TypeError, ValueError):
         pass
-    _env_ss = os.environ.get('SONG_START_SEC')
-    if _env_ss is not None and str(_env_ss).strip() != '':
-        try:
-            song_start_sec = float(_env_ss)
-        except ValueError:
-            pass
 
+    # Per-request override beats options.json (set by backend via TAP_MODE env var).
     if TAP_MODE_OVERRIDE is not None:
         tap_mode = TAP_MODE_OVERRIDE if TAP_MODE_OVERRIDE != '' else None
         print(f"🔧 TAP_MODE env override: {tap_mode!r}")
@@ -743,13 +926,16 @@ def main():
         print(f"⚠️  '{target_song}' not found, using '{first_song}'")
 
     audio_path = os.path.join(audio_folder_abs, first_song)
-    print(f"🎵 Song: {first_song}  |  Max duration: {MAX_DURATION}s  |  Window start: {song_start_sec:.2f}s\n")
+    print(
+        f"🎵 Song: {first_song}  |  Max duration: {MAX_DURATION}s  |  song_start_sec: {song_start_sec:.2f}s\n"
+    )
 
     existing = {}
     if os.path.exists(output_json_abs):
         with open(output_json_abs) as f:
             existing = json.load(f)
 
+    # Delete stale analyze_result.json so the backend is forced to serve fresh results.
     analyze_result_path = os.path.join(project_root, "backend", "uploads", "analyze_result.json")
     if os.path.exists(analyze_result_path):
         os.remove(analyze_result_path)
@@ -773,6 +959,7 @@ def main():
         with open(output_json_abs, 'w') as f:
             json.dump(results, f, indent=2)
 
+        # Update options.json song_filename
         if os.path.exists(options_file):
             try:
                 with open(options_file) as f:
@@ -797,6 +984,7 @@ def main():
     except Exception as e:
         print(f"❌ Error: {e}\n")
         import traceback; traceback.print_exc()
+
 
 
 if __name__ == "__main__":

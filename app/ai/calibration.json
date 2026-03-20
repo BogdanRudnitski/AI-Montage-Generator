@@ -2,106 +2,237 @@
   "songs": {
     "Starships": {
       "type_bonuses": {
-        "drum_low": -15,
-        "drum_mid": -15,
-        "pattern_change": -15,
-        "unknown": -15,
-        "vocal_transient": 2
+        "bass_drop": 0,
+        "drum_low": 0,
+        "drum_mid": 0,
+        "vocal_repetition": 0,
+        "vocal_transient": 0
       },
       "min_distance": 0.24,
-      "score_threshold": 65.0,
+      "score_threshold": 13.5,
       "density_profile": [
         {
           "start": 0.0,
-          "end": 5.0,
+          "end": 4.0,
           "target_cuts": 1,
-          "weight": 0.1
+          "min_distance": 0.24
         },
         {
-          "start": 5.0,
-          "end": 10.0,
-          "target_cuts": 3,
-          "weight": 0.3
+          "start": 4.0,
+          "end": 8.0,
+          "target_cuts": 1,
+          "min_distance": 0.24
         },
         {
-          "start": 10.0,
-          "end": 15.0,
-          "target_cuts": 3,
-          "weight": 0.3
+          "start": 8.0,
+          "end": 12.0,
+          "target_cuts": 4,
+          "min_distance": 0.509
         },
         {
-          "start": 15.0,
+          "start": 12.0,
+          "end": 16.0,
+          "target_cuts": 2,
+          "min_distance": 2.816
+        },
+        {
+          "start": 16.0,
           "end": 20.0,
-          "target_cuts": 6,
-          "weight": 0.6
+          "target_cuts": 9,
+          "min_distance": 0.358
         },
         {
           "start": 20.0,
-          "end": 25.0,
-          "target_cuts": 2,
-          "weight": 0.2
-        },
-        {
-          "start": 25.0,
-          "end": 30.0,
-          "target_cuts": 2,
-          "weight": 0.2
-        },
-        {
-          "start": 30.0,
-          "end": 35.0,
+          "end": 24.0,
           "target_cuts": 3,
-          "weight": 0.3
+          "min_distance": 0.518
         },
         {
-          "start": 35.0,
+          "start": 24.0,
+          "end": 28.0,
+          "target_cuts": 3,
+          "min_distance": 0.836
+        },
+        {
+          "start": 28.0,
+          "end": 32.0,
+          "target_cuts": 2,
+          "min_distance": 0.589
+        },
+        {
+          "start": 32.0,
+          "end": 36.0,
+          "target_cuts": 2,
+          "min_distance": 0.576
+        },
+        {
+          "start": 36.0,
           "end": 40.0,
-          "target_cuts": 3,
-          "weight": 0.3
+          "target_cuts": 2,
+          "min_distance": 0.358
         },
         {
           "start": 40.0,
-          "end": 45.0,
-          "target_cuts": 3,
-          "weight": 0.3
+          "end": 44.0,
+          "target_cuts": 5,
+          "min_distance": 0.225
         },
         {
-          "start": 45.0,
-          "end": 50.0,
+          "start": 44.0,
+          "end": 48.0,
+          "target_cuts": 4,
+          "min_distance": 0.207
+        },
+        {
+          "start": 48.0,
+          "end": 52.0,
+          "target_cuts": 4,
+          "min_distance": 0.204
+        },
+        {
+          "start": 52.0,
+          "end": 56.0,
           "target_cuts": 7,
-          "weight": 0.7
+          "min_distance": 0.314
         },
         {
-          "start": 50.0,
-          "end": 55.0,
-          "target_cuts": 7,
-          "weight": 0.7
-        },
-        {
-          "start": 55.0,
+          "start": 56.0,
           "end": 60.0,
-          "target_cuts": 10,
-          "weight": 1.0
+          "target_cuts": 8,
+          "min_distance": 0.366
         }
       ],
       "stats": {
-        "manual_cuts": 51,
-        "matched": 22,
-        "false_positives": 37,
-        "fully_missed": 29,
-        "p10_gap": 0.283,
-        "avg_gap": 1.13
+        "taps": 58,
+        "tapped_kept": 0,
+        "tapped_dismissed": 56,
+        "no_candidate": 2,
+        "p10_gap": 0.304,
+        "avg_gap": 0.993
+      }
+    },
+    "Caribbean%20Blue": {
+      "type_bonuses": {
+        "bass_drop": 0,
+        "drum_high": 17,
+        "drum_low": 0,
+        "drum_mid": 0,
+        "vocal_repetition": 6,
+        "vocal_transient": 0
+      },
+      "min_distance": 0.68,
+      "score_threshold": 10.0,
+      "density_profile": [
+        {
+          "start": 0.0,
+          "end": 4.0,
+          "target_cuts": 0,
+          "min_distance": 0.68
+        },
+        {
+          "start": 4.0,
+          "end": 8.0,
+          "target_cuts": 0,
+          "min_distance": 0.68
+        },
+        {
+          "start": 8.0,
+          "end": 12.0,
+          "target_cuts": 1,
+          "min_distance": 0.68
+        },
+        {
+          "start": 12.0,
+          "end": 16.0,
+          "target_cuts": 2,
+          "min_distance": 1.664
+        },
+        {
+          "start": 16.0,
+          "end": 20.0,
+          "target_cuts": 1,
+          "min_distance": 0.68
+        },
+        {
+          "start": 20.0,
+          "end": 24.0,
+          "target_cuts": 1,
+          "min_distance": 0.68
+        },
+        {
+          "start": 24.0,
+          "end": 28.0,
+          "target_cuts": 4,
+          "min_distance": 0.435
+        },
+        {
+          "start": 28.0,
+          "end": 32.0,
+          "target_cuts": 4,
+          "min_distance": 0.835
+        },
+        {
+          "start": 32.0,
+          "end": 36.0,
+          "target_cuts": 3,
+          "min_distance": 0.924
+        },
+        {
+          "start": 36.0,
+          "end": 40.0,
+          "target_cuts": 3,
+          "min_distance": 0.936
+        },
+        {
+          "start": 40.0,
+          "end": 44.0,
+          "target_cuts": 2,
+          "min_distance": 2.534
+        },
+        {
+          "start": 44.0,
+          "end": 48.0,
+          "target_cuts": 4,
+          "min_distance": 0.835
+        },
+        {
+          "start": 48.0,
+          "end": 52.0,
+          "target_cuts": 3,
+          "min_distance": 0.934
+        },
+        {
+          "start": 52.0,
+          "end": 56.0,
+          "target_cuts": 2,
+          "min_distance": 1.792
+        },
+        {
+          "start": 56.0,
+          "end": 60.0,
+          "target_cuts": 2,
+          "min_distance": 0.973
+        }
+      ],
+      "stats": {
+        "taps": 78,
+        "tapped_kept": 0,
+        "tapped_dismissed": 27,
+        "no_candidate": 51,
+        "p10_gap": 0.845,
+        "avg_gap": 1.491
       }
     }
   },
   "type_bonuses": {
-    "drum_low": -15.0,
-    "drum_mid": -15.0,
-    "pattern_change": -15.0,
-    "unknown": -15.0,
-    "vocal_transient": 2.0
+    "bass_drop": 0.0,
+    "drum_low": 0.0,
+    "drum_mid": 0.0,
+    "vocal_repetition": 3.0,
+    "vocal_transient": 0.0,
+    "drum_high": 17.0
   },
   "min_distance": 0.24,
-  "score_threshold": 65.0,
-  "songs_calibrated": 1
+  "score_threshold": 10.9,
+  "songs_calibrated": 2
 }

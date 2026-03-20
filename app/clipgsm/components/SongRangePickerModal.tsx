@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import { Audio, AVPlaybackStatus } from "expo-av";
 import { Ionicons } from "@expo/vector-icons";
+import { SERVER_URL } from "../config";
 
 const NUM_BARS = 72;
 
@@ -24,6 +25,7 @@ function formatTime(sec: number): string {
 type Props = {
   visible: boolean;
   onClose: () => void;
+  songName: string;
   songUri: string;
   /** Analysis / video window length (e.g. 15–60). */
   windowDurationSec: number;
@@ -34,6 +36,7 @@ type Props = {
 export function SongRangePickerModal({
   visible,
   onClose,
+  songName,
   songUri,
   windowDurationSec,
   initialStartSec,
@@ -43,11 +46,13 @@ export function SongRangePickerModal({
   const [loading, setLoading] = useState(true);
   const [songDurationSec, setSongDurationSec] = useState(1);
   const [startSec, setStartSec] = useState(initialStartSec);
-  const [playing, setPlaying] = useState(false);
   const [trackWidth, setTrackWidth] = useState(280);
+  const [waveBars, setWaveBars] = useState<number[]>(() => Array.from({ length: NUM_BARS }, () => 0.35));
 
   const startSecRef = useRef(initialStartSec);
   const panOriginStartRef = useRef(0);
+  const isDraggingRef = useRef(false);
+  const soundRef = useRef<Audio.Sound | null>(null);
 
   useEffect(() => {
     startSecRef.current = startSec;
@@ -100,15 +105,14 @@ export function SongRangePickerModal({
           { shouldPlay: false },
           (status: AVPlaybackStatus) => {
             if (!status.isLoaded) return;
-            setPlaying(Boolean(status.isPlaying));
             const durMs = status.durationMillis ?? 0;
             if (durMs > 0) {
               setSongDurationSec(Math.max(0.1, durMs / 1000));
             }
+            if (isDraggingRef.current) return;
             const pos = (status.positionMillis ?? 0) / 1000;
             const winEnd = startSecRef.current + windowDurationSec;
             if (status.isPlaying && pos >= winEnd - 0.04) {
-              sn.pauseAsync().catch(() => {});
               sn.setPositionAsync(startSecRef.current * 1000).catch(() => {});
             }
           }
@@ -118,7 +122,10 @@ export function SongRangePickerModal({
           return;
         }
         await sn.setProgressUpdateIntervalAsync(50);
+        soundRef.current = sn;
         setSound(sn);
+        await sn.setPositionAsync(startSecRef.current * 1000);
+        await sn.playAsync();
       } catch {
         setSound(null);
       } finally {
@@ -131,11 +138,37 @@ export function SongRangePickerModal({
   }, [visible, songUri, windowDurationSec]);
 
   useEffect(() => {
+    let mounted = true;
+    (async () => {
+      if (!visible) return;
+      try {
+        const query = `bars=${NUM_BARS}&song_filename=${encodeURIComponent(songName || "")}`;
+        const res = await fetch(`${SERVER_URL}/api/song-waveform?${query}`);
+        const data = await res.json();
+        if (!mounted) return;
+        const bars = Array.isArray(data?.bars) ? data.bars : [];
+        if (bars.length > 0) {
+          setWaveBars(
+            bars.map((v: number) =>
+              Math.max(0.08, Math.min(1, Number.isFinite(v) ? Number(v) : 0.08))
+            )
+          );
+        }
+      } catch {
+        // Keep fallback bars if waveform request fails.
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [visible, songName]);
+
+  useEffect(() => {
     if (!visible && sound) {
       sound.stopAsync().catch(() => {});
       sound.unloadAsync().catch(() => {});
+      soundRef.current = null;
       setSound(null);
-      setPlaying(false);
     }
   }, [visible, sound]);
 
@@ -156,7 +189,12 @@ export function SongRangePickerModal({
         onStartShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponder: () => true,
         onPanResponderGrant: () => {
+          isDraggingRef.current = true;
           panOriginStartRef.current = startSecRef.current;
+          const s = soundRef.current;
+          if (s) {
+            s.pauseAsync().catch(() => {});
+          }
         },
         onPanResponderMove: (_, g) => {
           const d = Math.max(0.01, songDurationSec);
@@ -166,39 +204,27 @@ export function SongRangePickerModal({
           setStartSec(next);
         },
         onPanResponderRelease: () => {
-          panOriginStartRef.current = startSecRef.current;
+          isDraggingRef.current = false;
+          const next = clampStart(startSecRef.current);
+          startSecRef.current = next;
+          setStartSec(next);
+          panOriginStartRef.current = next;
+          const s = soundRef.current;
+          if (s) {
+            void s
+              .setPositionAsync(next * 1000)
+              .then(() => s.playAsync())
+              .catch(() => {});
+          }
         },
       }),
     [songDurationSec, trackWidth, clampStart]
   );
 
-  async function togglePlay() {
-    if (!sound) return;
-    const winEnd = startSec + windowDurationSec;
-    const status = await sound.getStatusAsync();
-    if (!status.isLoaded) return;
-    const pos = (status.positionMillis ?? 0) / 1000;
-    if (status.isPlaying) {
-      await sound.pauseAsync();
-      return;
-    }
-    if (pos < startSec - 0.02 || pos >= winEnd - 0.02) {
-      await sound.setPositionAsync(startSec * 1000);
-    }
-    await sound.playAsync();
-  }
-
   function onLayoutTrack(e: LayoutChangeEvent) {
     const w = e.nativeEvent.layout.width;
     if (w > 0) setTrackWidth(w);
   }
-
-  const barHeights = useMemo(() => {
-    return Array.from({ length: NUM_BARS }, (_, i) => {
-      const t = (i / NUM_BARS) * Math.PI * 4;
-      return 0.25 + 0.75 * Math.abs(Math.sin(t + 0.3 * (i % 7)));
-    });
-  }, []);
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
@@ -211,8 +237,8 @@ export function SongRangePickerModal({
             </TouchableOpacity>
           </View>
           <Text style={styles.hint}>
-            Drag the highlighted range to choose which {windowDurationSec}s of the track to analyze. Playback stays
-            inside the range.
+            Audio loops inside the highlighted {windowDurationSec}s window. Drag the window to pick a section (audio
+            pauses while you drag, then plays from the new start).
           </Text>
 
           {loading ? (
@@ -220,7 +246,7 @@ export function SongRangePickerModal({
           ) : (
             <>
               <View style={styles.waveWrap}>
-                {barHeights.map((h, i) => (
+                {waveBars.map((h, i) => (
                   <View
                     key={i}
                     style={[
@@ -259,10 +285,6 @@ export function SongRangePickerModal({
               <Text style={styles.timeSub}>Track length {formatTime(songDurationSec)}</Text>
 
               <View style={styles.actions}>
-                <TouchableOpacity style={styles.playBtn} onPress={togglePlay} disabled={!sound}>
-                  <Ionicons name={playing ? "pause" : "play"} size={22} color="#fff" />
-                  <Text style={styles.playBtnText}>{playing ? "Pause" : "Play section"}</Text>
-                </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.confirmBtn}
                   onPress={() => {
@@ -369,20 +391,6 @@ const styles = StyleSheet.create({
   actions: {
     marginTop: 20,
     gap: 12,
-  },
-  playBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    backgroundColor: "#0f172a",
-    paddingVertical: 12,
-    borderRadius: 12,
-  },
-  playBtnText: {
-    color: "#fff",
-    fontWeight: "600",
-    fontSize: 15,
   },
   confirmBtn: {
     backgroundColor: "#6366f1",

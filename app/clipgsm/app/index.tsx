@@ -28,6 +28,13 @@ function bytesToBase64(bytes: number[]): string {
   return out;
 }
 
+function formatMmSs(sec: number): string {
+  const s = Math.max(0, sec);
+  const m = Math.floor(s / 60);
+  const r = Math.floor(s % 60);
+  return `${m}:${r.toString().padStart(2, "0")}`;
+}
+
 /** Try to extract embedded cover art from MP3; on success set nameTrackArtUri to data URL. */
 function tryExtractMp3Art(uri: string, setArt: (dataUrl: string | null) => void) {
   (async () => {
@@ -84,9 +91,9 @@ export default function ExploreScreen() {
   const [aggressiveness, setAggressiveness] = useState(0.7);
   const [tapMode, setTapMode] = useState<null | "verbatim" | "calibrate">(null);
   const [songTapCount, setSongTapCount] = useState<number>(0);
+  const [loadingTapCount, setLoadingTapCount] = useState(false);
   const [calibrating, setCalibrating] = useState(false);
   const [calibrationDone, setCalibrationDone] = useState(false);
-  const calibrationSentForSongRef = useRef<string | null>(null);
 
   const [showMusicModal, setShowMusicModal] = useState(false);
   const [savedTracks, setSavedTracks] = useState<SavedTrack[]>([]);
@@ -359,14 +366,18 @@ export default function ExploreScreen() {
   const fetchSongTapCount = useCallback(async () => {
     if (!song) {
       setSongTapCount(0);
+      setLoadingTapCount(false);
       return;
     }
+    setLoadingTapCount(true);
     try {
       const res = await fetch(`${SERVER_URL}/api/taps/${encodeURIComponent(song.name)}`);
       const data = await res.json();
       setSongTapCount(data.manual_cuts?.length ?? 0);
     } catch {
       setSongTapCount(0);
+    } finally {
+      setLoadingTapCount(false);
     }
   }, [song]);
 
@@ -407,23 +418,8 @@ export default function ExploreScreen() {
     persistTapMode();
   }, [tapMode]);
 
-  useEffect(() => {
-    if (tapMode !== "calibrate") return;
-    if (!song || songTapCount < 1) return;
-    if (calibrationSentForSongRef.current === song.name) return;
-    calibrationSentForSongRef.current = song.name;
-    runCalibration();
-  }, [tapMode, song, songTapCount]);
-
-  useEffect(() => {
-    if (!song) {
-      calibrationSentForSongRef.current = null;
-      return;
-    }
-    if (tapMode !== "calibrate") {
-      calibrationSentForSongRef.current = null;
-    }
-  }, [tapMode, song?.name]);
+  // Note: calibrate mode does NOT call the backend immediately anymore.
+  // Instead, backend calibration runs inside POST /analyze when tap_mode="calibrate".
 
   // Invalidate previous analysis when the user selects a different song (avoid showing Enya cuts for Kesha)
   useEffect(() => {
@@ -441,12 +437,24 @@ export default function ExploreScreen() {
           {
             text: "Record now",
             onPress: () =>
-              router.push({ pathname: "/tap-recorder", params: { songName: song.name, songUri: song.uri } }),
+              router.push({
+                pathname: "/tap-recorder",
+                params: {
+                  songName: song.name,
+                  songUri: song.uri,
+                  songStartSec: String(songStartSec),
+                  windowDurationSec: String(duration),
+                },
+              }),
           },
           { text: "Cancel", style: "cancel" },
         ]
       );
       return;
+    }
+    if (tapMode === "calibrate") {
+      setCalibrating(true);
+      setCalibrationDone(false);
     }
     setGenerateLoading(true);
     try {
@@ -477,6 +485,9 @@ export default function ExploreScreen() {
         Alert.alert("Analyze Failed", data.error || "Unknown error");
         return;
       }
+      if (tapMode === "calibrate") {
+        setCalibrationDone(true);
+      }
       setAnalyzeResult({
         duration: data.duration,
         max_duration: data.max_duration,
@@ -502,6 +513,9 @@ export default function ExploreScreen() {
       Alert.alert("Analyze Failed", "Check your network connection.");
     } finally {
       setGenerateLoading(false);
+      if (tapMode === "calibrate") {
+        setCalibrating(false);
+      }
     }
   }
 
@@ -614,30 +628,6 @@ export default function ExploreScreen() {
     high: { label: "High", desc: "~90 cuts" },
   };
 
-  async function runCalibration() {
-    if (!song || calibrating) return;
-    setCalibrating(true);
-    setCalibrationDone(false);
-    try {
-      const res = await fetch(`${SERVER_URL}/api/calibrate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ song_filename: song.name }),
-      });
-      const data = await res.json();
-      if (!data.success) {
-        Alert.alert("Calibration failed", data.error || "Unknown error");
-        return;
-      }
-      setCalibrationDone(true);
-      Alert.alert("Calibration complete", "Tap-driven calibration finished.");
-    } catch {
-      Alert.alert("Calibration failed", "Please try again.");
-    } finally {
-      setCalibrating(false);
-    }
-  }
-
   return (
     <View style={styles.container}>
       <View style={styles.header}>
@@ -648,7 +638,7 @@ export default function ExploreScreen() {
         <View style={styles.headerDecor2} />
       </View>
 
-      <ScrollView 
+      <ScrollView
         style={styles.content}
         showsVerticalScrollIndicator={false}
       >
@@ -941,6 +931,68 @@ export default function ExploreScreen() {
           </Modal>
         </View>
 
+        {/* Duration Section */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <View style={styles.sectionTitleRow}>
+              <View style={styles.sectionIconBg}>
+                <Ionicons name="time-outline" size={22} color="#6366f1" />
+              </View>
+              <View>
+                <Text style={styles.sectionTitle}>Video Length</Text>
+                <Text style={styles.sectionSubtitle}>Choose duration</Text>
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.durationRow}>
+            {[15, 30, 45, 60].map((sec) => (
+              <TouchableOpacity
+                key={sec}
+                style={[
+                  styles.durationButton,
+                  duration === sec && styles.durationButtonActive
+                ]}
+                disabled={uiLocked}
+                onPress={() => {
+                  if (uiLocked) return;
+                  setDuration(sec);
+                  setSongUploaded(false);
+                }}
+                activeOpacity={0.7}
+              >
+                <Text style={[
+                  styles.durationText,
+                  duration === sec && styles.durationTextActive
+                ]}>
+                  {sec}s
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <TouchableOpacity
+            style={[styles.songSectionButton, (!song || uiLocked) && styles.buttonDisabled]}
+            disabled={!song || uiLocked}
+            onPress={() => {
+              if (!song || uiLocked) return;
+              setShowSongRangeModal(true);
+            }}
+            activeOpacity={0.75}
+          >
+            <Ionicons name="musical-notes-outline" size={18} color={song && !uiLocked ? "#6366f1" : "#94a3b8"} />
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <Text style={styles.songSectionButtonTitle}>Song Range</Text>
+              <Text style={styles.songSectionButtonSub}>
+                {song
+                  ? `from ${formatMmSs(songStartSec)} to ${formatMmSs(songStartSec + duration)} (${duration} s)`
+                  : "Pick a song first"}
+              </Text>
+            </View>
+            <Ionicons name="options-outline" size={18} color="#94a3b8" />
+          </TouchableOpacity>
+        </View>
+
         {song && (
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
@@ -957,17 +1009,27 @@ export default function ExploreScreen() {
 
             <TouchableOpacity
               style={[styles.recordTapsButton, songTapCount > 0 ? styles.recordTapsButtonRerecord : styles.recordTapsButtonRecord]}
-              onPress={() => router.push({ pathname: "/tap-recorder", params: { songName: song.name, songUri: song.uri } })}
+              onPress={() =>
+                router.push({
+                  pathname: "/tap-recorder",
+                  params: {
+                    songName: song.name,
+                    songUri: song.uri,
+                    songStartSec: String(songStartSec),
+                    windowDurationSec: String(duration),
+                  },
+                })
+              }
               activeOpacity={0.8}
-              disabled={uiLocked}
+              disabled={uiLocked || loadingTapCount}
             >
               <Ionicons
-                name={songTapCount > 0 ? "refresh-circle" : "add-circle"}
+                name={loadingTapCount ? "hourglass-outline" : songTapCount > 0 ? "refresh-circle" : "add-circle"}
                 size={20}
-                color={songTapCount > 0 ? "#334155" : "#fff"}
+                color={loadingTapCount ? "#fff" : songTapCount > 0 ? "#334155" : "#fff"}
               />
               <Text style={[styles.recordTapsButtonText, songTapCount > 0 && styles.recordTapsButtonTextRerecord]}>
-                {songTapCount > 0 ? `View taps (${songTapCount})` : "Record taps"}
+                {loadingTapCount ? "Loading taps..." : songTapCount > 0 ? `View taps (${songTapCount})` : "Record taps"}
               </Text>
             </TouchableOpacity>
 
@@ -977,10 +1039,10 @@ export default function ExploreScreen() {
                 style={[
                   styles.modeCard,
                   tapMode === "verbatim" && styles.modeCardSelected,
-                  songTapCount < 1 && styles.modeCardDisabled,
+                  (songTapCount < 1 || uiLocked) && styles.modeCardDisabled,
                 ]}
                 onPress={() => setTapMode("verbatim")}
-                disabled={songTapCount < 1}
+                disabled={songTapCount < 1 || uiLocked}
               >
                 <View style={styles.modeCardLeft}>
                   <Ionicons name="hand-left-outline" size={22} color={songTapCount < 1 ? "#94a3b8" : "#6366f1"} />
@@ -999,10 +1061,10 @@ export default function ExploreScreen() {
                 style={[
                   styles.modeCard,
                   tapMode === "calibrate" && styles.modeCardSelected,
-                  songTapCount < 1 && styles.modeCardDisabled,
+                  (songTapCount < 1 || uiLocked) && styles.modeCardDisabled,
                 ]}
                 onPress={() => setTapMode("calibrate")}
-                disabled={songTapCount < 1}
+                disabled={songTapCount < 1 || uiLocked}
               >
                 <View style={styles.modeCardLeft}>
                   <Ionicons name="locate-outline" size={22} color={songTapCount < 1 ? "#94a3b8" : "#6366f1"} />
@@ -1031,8 +1093,10 @@ export default function ExploreScreen() {
                 style={[
                   styles.modeCard,
                   tapMode === null && styles.modeCardSelected,
+                  uiLocked && styles.modeCardDisabled,
                 ]}
                 onPress={() => setTapMode(null)}
+                disabled={uiLocked}
               >
                 <View style={styles.modeCardLeft}>
                   <Ionicons name="hardware-chip-outline" size={22} color="#6366f1" />
@@ -1217,73 +1281,10 @@ export default function ExploreScreen() {
           </View>
         )}
 
-        {/* Duration Section */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <View style={styles.sectionTitleRow}>
-              <View style={styles.sectionIconBg}>
-                <Ionicons name="time-outline" size={22} color="#6366f1" />
-              </View>
-              <View>
-                <Text style={styles.sectionTitle}>Video Length</Text>
-                <Text style={styles.sectionSubtitle}>Choose duration</Text>
-              </View>
-            </View>
-          </View>
-
-          <View style={styles.durationRow}>
-            {[15, 30, 45, 60].map((sec) => (
-              <TouchableOpacity
-                key={sec}
-                style={[
-                  styles.durationButton,
-                  duration === sec && styles.durationButtonActive
-                ]}
-                disabled={uiLocked}
-                onPress={() => {
-                  if (uiLocked) return;
-                  setDuration(sec);
-                  setSongUploaded(false);
-                }}
-                activeOpacity={0.7}
-              >
-                <Text style={[
-                  styles.durationText,
-                  duration === sec && styles.durationTextActive
-                ]}>
-                  {sec}s
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          <TouchableOpacity
-            style={[styles.songSectionButton, (!song || uiLocked) && styles.buttonDisabled]}
-            disabled={!song || uiLocked}
-            onPress={() => {
-              if (!song || uiLocked) return;
-              setShowSongRangeModal(true);
-            }}
-            activeOpacity={0.75}
-          >
-            <Ionicons name="musical-notes-outline" size={20} color={song && !uiLocked ? "#4338ca" : "#94a3b8"} />
-            <View style={{ flex: 1, marginLeft: 10 }}>
-              <Text style={styles.songSectionButtonTitle}>Where in the song</Text>
-              <Text style={styles.songSectionButtonSub}>
-                {song
-                  ? `Analyzing from ${Math.floor(songStartSec / 60)}:${Math.floor(songStartSec % 60)
-                      .toString()
-                      .padStart(2, "0")} · ${duration}s window`
-                  : "Pick a song first"}
-              </Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color="#94a3b8" />
-          </TouchableOpacity>
-        </View>
-
         <SongRangePickerModal
           visible={showSongRangeModal}
           onClose={() => setShowSongRangeModal(false)}
+          songName={song?.name ?? ""}
           songUri={song?.uri ?? ""}
           windowDurationSec={duration}
           initialStartSec={songStartSec}
@@ -1858,21 +1859,26 @@ const styles = StyleSheet.create({
     marginTop: 14,
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#eef2ff",
-    borderRadius: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 14,
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    paddingVertical: 17,
+    paddingHorizontal: 17,
     borderWidth: 1,
-    borderColor: "#c7d2fe",
+    borderColor: "#e2e8f0",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
   },
   songSectionButtonTitle: {
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: "700",
     color: "#312e81",
   },
   songSectionButtonSub: {
-    fontSize: 12,
-    color: "#6366f1",
+    fontSize: 13,
+    color: "#64748b",
     marginTop: 2,
   },
   durationRow: {

@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import unquote
 import subprocess
 from datetime import datetime
+from array import array
 
 app = FastAPI()
 
@@ -250,7 +251,7 @@ async def upload_single_file(
     dedupe = deduplicate.strip().lower() in ("true", "1", "yes")
     saved_files = []
     os.makedirs(MEDIA_DIR, exist_ok=True)
-
+    
     for f in files:
         raw = (f.filename or "unnamed").strip()
         ext = _original_extension(raw)
@@ -541,6 +542,82 @@ async def get_taps(song_filename: str):
         return {"manual_cuts": []}
 
 
+@app.get("/api/song-waveform")
+async def get_song_waveform(song_filename: Optional[str] = Query(None), bars: int = Query(72)):
+    """Return normalized waveform bars for the uploaded song using ffmpeg PCM decode."""
+    try:
+        bars = max(16, min(256, int(bars or 72)))
+        options = _read_json_file(OPTIONS_FILE, {})
+        target_name = (song_filename or options.get("song_filename") or "").strip()
+        songs_dir = Path("uploads/songs")
+        if not songs_dir.exists():
+            return {"bars": [0.2] * bars}
+        song_path: Optional[Path] = None
+        if target_name:
+            exact = songs_dir / target_name
+            if exact.exists():
+                song_path = exact
+            else:
+                target_norm = unquote(target_name).strip().lower()
+                for f in songs_dir.iterdir():
+                    if f.is_file() and unquote(f.name).strip().lower() == target_norm:
+                        song_path = f
+                        break
+        if song_path is None:
+            song_path = next((f for f in songs_dir.iterdir() if f.is_file()), None)
+        if song_path is None:
+            return {"bars": [0.2] * bars}
+
+        pcm = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                str(song_path),
+                "-ac",
+                "1",
+                "-ar",
+                "8000",
+                "-f",
+                "s16le",
+                "pipe:1",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        raw = pcm.stdout or b""
+        if len(raw) < 4:
+            return {"bars": [0.2] * bars}
+        samples = array("h")
+        samples.frombytes(raw)
+        total = len(samples)
+        if total == 0:
+            return {"bars": [0.2] * bars}
+
+        chunk = max(1, total // bars)
+        out = []
+        max_abs = 1.0
+        for i in range(bars):
+            start = i * chunk
+            end = total if i == bars - 1 else min(total, (i + 1) * chunk)
+            if start >= total:
+                out.append(0.0)
+                continue
+            seg = samples[start:end]
+            if not seg:
+                out.append(0.0)
+                continue
+            peak = max(abs(v) for v in seg)
+            out.append(float(peak))
+            if peak > max_abs:
+                max_abs = float(peak)
+        normalized = [round(max(0.06, min(1.0, v / max_abs)), 4) for v in out]
+        return {"bars": normalized, "song_filename": song_path.name}
+    except Exception:
+        return {"bars": [0.2] * max(16, min(256, int(bars or 72)))}
+
+
 @app.post("/api/options")
 async def update_options(body: dict = Body(...)):
     try:
@@ -574,9 +651,23 @@ async def run_calibrate(body: dict = Body(...)):
         if entry is None:
             return {"success": False, "error": f"No taps found for song '{song_filename}'"}
         _materialize_song_taps_file(song_filename, entry)
+
+        # Ensure calibrate.py sees the same window settings as analysis:
+        # - calibrate.py reads max_duration from env (MAX_DURATION)
+        # - calibrate.py reads song_start_sec + focus flags from options.json
+        env = os.environ.copy()
+        try:
+            with open(OPTIONS_FILE) as f:
+                opts = json.load(f)
+            env["MAX_DURATION"] = str(int(opts.get("max_duration", 60)))
+            env["SONG_START_SEC"] = str(float(opts.get("song_start_sec", 0) or 0))
+        except Exception:
+            # Fall back to defaults; calibration can still run using options.json.
+            env["MAX_DURATION"] = str(60)
         proc = subprocess.run(
             [str(AI_VENV_PYTHON), str(CALIBRATE_SCRIPT), song_filename],
             cwd=str(AI_DIR),
+            env=env,
             capture_output=True,
             text=True,
             timeout=1800,
@@ -688,6 +779,27 @@ async def analyze_only(body: Optional[dict] = Body(None)):
                         break
             if taps_entry is not None:
                 _materialize_song_taps_file(song_for_taps, taps_entry)
+
+        # If user selected Calibrate AI cut mode, run calibrate.py first so
+        # analyze.py can immediately use the freshly-updated calibration.json.
+        if requested_tap_mode == "calibrate":
+            song_filename_for_cal = options.get("song_filename")
+            if not song_filename_for_cal:
+                return {"success": False, "error": "song_filename missing; cannot calibrate"}
+            print(f"[TRACE] tap_mode=calibrate; running calibrate.py for {song_filename_for_cal!r} ...")
+            proc_cal = subprocess.run(
+                [str(AI_VENV_PYTHON), str(CALIBRATE_SCRIPT), song_filename_for_cal],
+                cwd=str(AI_DIR),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=1800,
+            )
+            if proc_cal.returncode != 0:
+                cal_out = ((proc_cal.stdout or "") + ("\n" + proc_cal.stderr if proc_cal.stderr else "")).strip()
+                print("[TRACE] calibrate.py stderr:", (proc_cal.stderr or "")[:800])
+                return {"success": False, "error": cal_out or "Calibration failed"}
+
         # 1) Run analyze.py
         print("[TRACE] running analyze.py (cwd=%s) ..." % AI_DIR)
         proc = subprocess.run(

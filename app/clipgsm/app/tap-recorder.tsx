@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Animated, Platform, Pressable, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { Alert, Animated, BackHandler, Platform, Pressable, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { Audio, AVPlaybackStatus } from "expo-av";
 import { Ionicons } from "@expo/vector-icons";
 import { router, useLocalSearchParams } from "expo-router";
@@ -19,9 +19,16 @@ function formatTimestamp(sec: number): string {
 }
 
 export default function TapRecorderScreen() {
-  const { songName, songUri } = useLocalSearchParams<{ songName?: string; songUri?: string }>();
+  const { songName, songUri, songStartSec, windowDurationSec } = useLocalSearchParams<{
+    songName?: string;
+    songUri?: string;
+    songStartSec?: string;
+    windowDurationSec?: string;
+  }>();
   const safeSongName = typeof songName === "string" ? songName : "Song";
   const safeSongUri = typeof songUri === "string" ? songUri : "";
+  const rangeStartSec = Math.max(0, Number(songStartSec ?? 0) || 0);
+  const selectedWindowSec = Math.max(1, Number(windowDurationSec ?? 60) || 60);
 
   const [sound, setSound] = useState<Audio.Sound | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -29,23 +36,36 @@ export default function TapRecorderScreen() {
   const positionMsRef = useRef(0); // always current — avoids stale state capture in handleTap
   const [durationMs, setDurationMs] = useState(1);
   const [cuts, setCuts] = useState<ManualCut[]>([]);
+  const [persistedCutsOutsideRange, setPersistedCutsOutsideRange] = useState<ManualCut[]>([]);
+  const [loadingTaps, setLoadingTaps] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [trackWidth, setTrackWidth] = useState(1);
   const scaleAnim = useRef(new Animated.Value(1)).current;
+  const soundRef = useRef<Audio.Sound | null>(null);
 
-  const MAX_RECORD_MS = 60000;
-  const durationSafe = Math.max(Math.min(durationMs, MAX_RECORD_MS), 1);
-  const progress = Math.max(0, Math.min(1, positionMs / durationSafe));
+  const rangeStartMs = rangeStartSec * 1000;
+  /** Full selected window length (e.g. 60s), independent of taps; shrink only if file ends early. */
+  const windowMs = Math.max(1, selectedWindowSec * 1000);
+  const fileLoaded = durationMs > rangeStartMs + 250;
+  const rangeDurationMs = Math.max(
+    1,
+    fileLoaded ? Math.min(windowMs, Math.max(1, durationMs - rangeStartMs)) : windowMs
+  );
+  const rangeEndMs = rangeStartMs + rangeDurationMs;
+  const localPositionMs = Math.max(0, Math.min(rangeDurationMs, positionMs - rangeStartMs));
+  const progress = Math.max(0, Math.min(1, localPositionMs / rangeDurationMs));
   const cutsCountLabel = `${cuts.length} cuts`;
 
   useEffect(() => {
     let mounted = true;
     (async () => {
       if (!safeSongName) return;
+      setLoadingTaps(true);
       try {
         const res = await fetch(`${SERVER_URL}/api/taps/${encodeURIComponent(safeSongName)}`);
         const data = await res.json();
         if (!mounted) return;
-        const loaded = (data.manual_cuts || []).map((c: any, i: number) => {
+        const all = (data.manual_cuts || []).map((c: any, i: number) => {
           const ts = Number((Number(c.timestamp) || 0).toFixed(3));
           return {
             index: i + 1,
@@ -53,18 +73,43 @@ export default function TapRecorderScreen() {
             timestamp_fmt: c.timestamp_fmt || formatTimestamp(ts),
           } as ManualCut;
         });
-        setCuts(loaded);
+        const inRange = all.filter((c: ManualCut) => c.timestamp >= rangeStartSec - 1e-6 && c.timestamp <= (rangeStartSec + selectedWindowSec + 1e-6));
+        const outRange = all.filter((c: ManualCut) => c.timestamp < rangeStartSec - 1e-6 || c.timestamp > (rangeStartSec + selectedWindowSec + 1e-6));
+        setCuts(inRange.map((c: ManualCut, i: number) => ({ ...c, index: i + 1 })));
+        setPersistedCutsOutsideRange(outRange);
       } catch {
         // ignore, user can still tap
+      } finally {
+        if (mounted) setLoadingTaps(false);
       }
     })();
     return () => {
       mounted = false;
     };
-  }, [safeSongName]);
+  }, [safeSongName, rangeStartSec, selectedWindowSec]);
+
+  const stopAndUnloadSound = useCallback(async () => {
+    const s = soundRef.current;
+    soundRef.current = null;
+    setSound(null);
+    setIsPlaying(false);
+    if (!s) return;
+    try {
+      await s.stopAsync();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await s.unloadAsync();
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   useEffect(() => {
     let mounted = true;
+    let createdSound: Audio.Sound | null = null;
+    const playbackHolderRef = { current: null as Audio.Sound | null };
     (async () => {
       try {
         await Audio.setAudioModeAsync({
@@ -75,41 +120,64 @@ export default function TapRecorderScreen() {
           staysActiveInBackground: false,
         });
         if (!safeSongUri) return;
+        const rangeStart = rangeStartSec * 1000;
+        const winLen = Math.max(1, selectedWindowSec * 1000);
         const created = await Audio.Sound.createAsync(
           { uri: safeSongUri },
           { shouldPlay: false },
           (status: AVPlaybackStatus) => {
             if (!status.isLoaded) return;
+            const sn = playbackHolderRef.current;
+            if (!sn) return;
             const nextPos = status.positionMillis ?? 0;
             const nextDur = status.durationMillis ?? 1;
-            positionMsRef.current = Math.min(nextPos, MAX_RECORD_MS);
-            setPositionMs(Math.min(nextPos, MAX_RECORD_MS));
-            setDurationMs(Math.min(nextDur, MAX_RECORD_MS));
+            const endMs = rangeStart + Math.min(winLen, Math.max(1, nextDur - rangeStart));
+            positionMsRef.current = nextPos;
+            setPositionMs(nextPos);
+            setDurationMs(nextDur);
             setIsPlaying(Boolean(status.isPlaying));
-            if ((status.positionMillis ?? 0) >= MAX_RECORD_MS && status.isPlaying) {
-              created.sound.pauseAsync().catch(() => {});
+            if (status.isPlaying && nextPos >= endMs - 30) {
+              sn.setPositionAsync(rangeStart).catch(() => {});
             }
           }
         );
+        createdSound = created.sound;
+        playbackHolderRef.current = created.sound;
         if (!mounted) {
           await created.sound.unloadAsync();
+          playbackHolderRef.current = null;
           return;
         }
         await created.sound.setProgressUpdateIntervalAsync(16);
+        await created.sound.setPositionAsync(rangeStart);
+        soundRef.current = created.sound;
         setSound(created.sound);
+        await created.sound.playAsync();
       } catch {
         Alert.alert("Audio error", "Could not load the selected song.");
       }
     })();
     return () => {
       mounted = false;
-      if (sound) sound.unloadAsync().catch(() => {});
+      if (createdSound) {
+        createdSound.stopAsync().catch(() => {});
+        createdSound.unloadAsync().catch(() => {});
+        soundRef.current = null;
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [safeSongUri]);
+  }, [safeSongUri, rangeStartSec, selectedWindowSec]);
+
+  useEffect(() => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      void stopAndUnloadSound();
+      router.back();
+      return true;
+    });
+    return () => sub.remove();
+  }, [stopAndUnloadSound]);
 
   const handleTap = useCallback(() => {
-    const ts = Number((positionMsRef.current / 1000).toFixed(3));
+    const ts = Number((positionMsRef.current / 1000).toFixed(3)); // absolute song timestamp
     const next = cuts.length + 1;
     Animated.sequence([
       Animated.timing(scaleAnim, { toValue: 0.9, duration: 35, useNativeDriver: true }),
@@ -119,20 +187,22 @@ export default function TapRecorderScreen() {
   }, [cuts.length, scaleAnim]);
 
   const togglePlay = useCallback(async () => {
-    if (!sound) return;
-    const status = await sound.getStatusAsync();
+    const sn = soundRef.current;
+    if (!sn) return;
+    const status = await sn.getStatusAsync();
     if (!status.isLoaded) return;
-    if (status.isPlaying) await sound.pauseAsync();
-    else await sound.playAsync();
-  }, [sound]);
+    if (status.isPlaying) await sn.pauseAsync();
+    else await sn.playAsync();
+  }, []);
 
   const seekToRatio = useCallback(
     async (ratio: number) => {
-      if (!sound) return;
+      const sn = soundRef.current;
+      if (!sn) return;
       const next = Math.max(0, Math.min(1, ratio));
-      await sound.setPositionAsync(Math.min(next * durationSafe, MAX_RECORD_MS));
+      await sn.setPositionAsync(rangeStartMs + next * rangeDurationMs);
     },
-    [sound, durationSafe]
+    [rangeDurationMs, rangeStartMs]
   );
 
   useEffect(() => {
@@ -160,26 +230,35 @@ export default function TapRecorderScreen() {
         body: JSON.stringify({
           song_filename: safeSongName,
           recorded_at: new Date().toISOString(),
-          manual_cuts: cuts,
+          manual_cuts: [...persistedCutsOutsideRange, ...cuts]
+            .sort((a, b) => a.timestamp - b.timestamp)
+            .map((c, i) => ({ ...c, index: i + 1 })),
         }),
       });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || "Failed to save");
       Alert.alert("Saved", `${data.cut_count ?? cuts.length} cuts saved`);
+      await stopAndUnloadSound();
       router.back();
     } catch {
       Alert.alert("Save failed", "Could not save taps.");
     } finally {
       setSaving(false);
     }
-  }, [cuts, safeSongName, saving]);
+  }, [cuts, persistedCutsOutsideRange, safeSongName, saving, stopAndUnloadSound]);
 
   const recentChips = useMemo(() => [...cuts].reverse(), [cuts]);
 
   return (
     <View style={styles.screen}>
       <View style={styles.topBar}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.topAction}>
+        <TouchableOpacity
+          onPress={async () => {
+            await stopAndUnloadSound();
+            router.back();
+          }}
+          style={styles.topAction}
+        >
           <Ionicons name="arrow-back" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.songTitle} numberOfLines={1}>
@@ -193,15 +272,20 @@ export default function TapRecorderScreen() {
       <Pressable
         style={styles.progressWrap}
         onPress={(e) => {
-          const w = e.nativeEvent.layout?.width ?? 1;
+          const w = trackWidth || 1;
           const x = e.nativeEvent.locationX ?? 0;
           seekToRatio(x / w);
         }}
       >
-        <View style={styles.progressTrack}>
-          <View style={[styles.playhead, { left: `${progress * 100}%` }]} />
+        <View
+          style={styles.progressTrack}
+          onLayout={(e) => setTrackWidth(Math.max(1, e.nativeEvent.layout.width))}
+        >
+          <View style={[styles.playhead, { left: progress * trackWidth }]} />
           {cuts.map((c) => {
-            const left = `${Math.max(0, Math.min(100, ((c.timestamp * 1000) / durationSafe) * 100))}%`;
+            const left =
+              Math.max(0, Math.min(1, ((c.timestamp - rangeStartSec) * 1000) / rangeDurationMs)) *
+              trackWidth;
             return <View key={`${c.index}-${c.timestamp}`} style={[styles.marker, { left }]} />;
           })}
         </View>
@@ -210,9 +294,9 @@ export default function TapRecorderScreen() {
         <Slider
           style={styles.scrubber}
           minimumValue={0}
-          maximumValue={durationSafe}
-          value={positionMs}
-          onSlidingComplete={(value) => seekToRatio(value / durationSafe)}
+          maximumValue={rangeDurationMs}
+          value={localPositionMs}
+          onSlidingComplete={(value) => seekToRatio(value / rangeDurationMs)}
           minimumTrackTintColor="#6366f1"
           maximumTrackTintColor="#475569"
           thumbTintColor="#fff"
@@ -225,7 +309,7 @@ export default function TapRecorderScreen() {
             <Ionicons name="hand-left" size={48} color="#fff" />
           </TouchableOpacity>
         </Animated.View>
-        <Text style={styles.tapLabel}>Tap to cut</Text>
+        <Text style={styles.tapLabel}>Tap to cut ({formatTimestamp(rangeStartSec)} to {formatTimestamp(rangeStartSec + selectedWindowSec)})</Text>
       </View>
 
       <View style={styles.bottomSheet}>
@@ -246,7 +330,11 @@ export default function TapRecorderScreen() {
           </TouchableOpacity>
         </View>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsRow}>
-          {recentChips.map((c) => (
+          {loadingTaps ? (
+            <View style={styles.chip}>
+              <Text style={styles.chipText}>Loading taps...</Text>
+            </View>
+          ) : recentChips.map((c) => (
             <View key={`chip-${c.index}-${c.timestamp}`} style={styles.chip}>
               <Text style={styles.chipText}>{c.timestamp_fmt}</Text>
             </View>
