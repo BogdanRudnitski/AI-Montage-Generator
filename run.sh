@@ -45,7 +45,7 @@ sleep 1
 # ─── Start backend ────────────────────────────────────────────────────────────
 
 info "Starting backend..."
-(cd app/backend && source venv/bin/activate && uvicorn main:app --host 0.0.0.0 --port 8000) &
+(cd app/backend && source venv/bin/activate && uvicorn main:app --host 0.0.0.0 --port 8000 --reload) &
 BACKEND_PID=$!
 ok "Backend started (PID $BACKEND_PID) → http://localhost:8000"
 

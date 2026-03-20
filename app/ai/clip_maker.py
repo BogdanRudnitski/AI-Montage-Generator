@@ -172,116 +172,81 @@ class ClipManager:
                 return True
         return False
 
-    def _choose_clip(self, force_new_clip: bool):
+    def _choose_clip(self, force_new_clip: bool, candidates=None):
         """
         Choose which clip to use. Prefer clips not in recent history.
         Fallback: full list (random) if no non-recent clips or only one clip.
+        `candidates`: optional subset (e.g. only clips long enough for the segment).
         """
-        if not self.clips:
+        pool = candidates if candidates is not None else self.clips
+        if not pool:
             return None
-        if len(self.clips) == 1:
-            return self.clips[0]
+        if len(pool) == 1:
+            return pool[0]
         recent_set = set(self.recent_filenames)
-        # Prefer clips not used recently (spread across videos)
-        not_recent = [c for c in self.clips if c['filename'] not in recent_set]
+        not_recent = [c for c in pool if c['filename'] not in recent_set]
         if force_new_clip and self.last_used_clip is not None:
-            other = [c for c in self.clips if c['filename'] != self.last_used_clip]
+            other = [c for c in pool if c['filename'] != self.last_used_clip]
             if other:
                 not_recent = [c for c in not_recent if c['filename'] != self.last_used_clip] if not_recent else other
-        candidates = not_recent if not_recent else self.clips
-        return random.choice(candidates)
+        pick_from = not_recent if not_recent else pool
+        return random.choice(pick_from)
 
-    def get_segment_info(self, duration: float, force_new_clip: bool = False):
+    def _pick_window_in_clip(self, clip_data: dict, duration: float):
         """
-        Get segment info: which clip and which [start, end] in that clip's timeline.
-        Fallback order: 1) video not recent 2) unused time range 3) continuation from last 4) random.
-        Returns dict with path, filename, start, end, duration, clip_duration (for metadata).
+        Pick [start, end] inside clip with end - start == duration.
+        Returns (start_time, end_time) or None if impossible.
         """
-        if not self.clips:
-            return None
-
-        clip_data = self._choose_clip(force_new_clip)
-        if not clip_data:
-            return None
-
-        filename = clip_data['filename']
         clip_duration = clip_data['duration']
+        filename = clip_data['filename']
         used = self.clip_usage[filename]
-        start_time = 0.0
-        end_time = min(duration, clip_duration)
-
-        if clip_duration < duration:
-            # Clip shorter than segment; we'll loop it. Use from 0.
-            self.clip_usage[filename].append((0, clip_duration))
-            self._push_recent(filename)
-            self.last_used_clip = filename
-            self.last_used_end = clip_duration
-            return {
-                'path': clip_data['path'],
-                'filename': filename,
-                'start': 0,
-                'end': clip_duration,
-                'duration': duration,
-                'clip_duration': clip_duration,
-            }
-
+        if clip_duration + 1e-9 < duration:
+            return None
         max_start = clip_duration - duration
-        if max_start <= 0:
-            self._push_recent(filename)
-            self.last_used_clip = filename
-            self.last_used_end = clip_duration
-            return {
-                'path': clip_data['path'],
-                'filename': filename,
-                'start': 0,
-                'end': clip_duration,
-                'duration': duration,
-                'clip_duration': clip_duration,
-            }
+        if max_start <= 1e-9:
+            # Span must equal segment duration (not full file length when file is slightly longer).
+            return 0.0, float(duration)
 
-        # Prefer unused time range (no overlap with used)
         for _ in range(25):
             start = random.uniform(0, max_start)
             end = start + duration
             if not self._overlaps_any(start, end, used):
-                start_time = start
-                end_time = end
-                self.clip_usage[filename].append((start_time, end_time))
-                self._push_recent(filename)
-                self.last_used_clip = filename
-                self.last_used_end = end_time
-                return {
-                    'path': clip_data['path'],
-                    'filename': filename,
-                    'start': start_time,
-                    'end': end_time,
-                    'duration': duration,
-                    'clip_duration': clip_duration,
-                }
+                return start, end
 
-        # Prefer continuation: start near previous end (same video) when possible
         if self.last_used_clip == filename and self.last_used_end is not None:
             cont_start = self.last_used_end
-            if cont_start + duration <= clip_duration:
+            if cont_start + duration <= clip_duration + 1e-9:
                 start_time = cont_start
                 end_time = cont_start + duration
                 if not self._overlaps_any(start_time, end_time, used):
-                    self.clip_usage[filename].append((start_time, end_time))
-                    self._push_recent(filename)
-                    self.last_used_clip = filename
-                    self.last_used_end = end_time
-                    return {
-                        'path': clip_data['path'],
-                        'filename': filename,
-                        'start': start_time,
-                        'end': end_time,
-                        'duration': duration,
-                        'clip_duration': clip_duration,
-                    }
+                    return start_time, end_time
 
-        # Fallback: random time in video
         start_time = random.uniform(0, max_start)
         end_time = start_time + duration
+        return start_time, end_time
+
+    def get_segment_info(self, duration: float, force_new_clip: bool = False):
+        """
+        Get segment info: which clip and which [start, end] in that clip's timeline.
+        The clip must cover the full segment duration (no looping / freeze in preview).
+        Only uses clips with duration >= segment duration; tries another clip if needed.
+        Returns dict with path, filename, start, end, duration, clip_duration (full file length).
+        Returns None if no clip is long enough (caller should split the segment).
+        """
+        if not self.clips or duration <= 1e-9:
+            return None
+
+        eps = 1e-6
+        eligible = [c for c in self.clips if c['duration'] + eps >= duration]
+        if not eligible:
+            return None
+
+        clip_data = self._choose_clip(force_new_clip, candidates=eligible)
+        if not clip_data:
+            return None
+        start_time, end_time = self._pick_window_in_clip(clip_data, duration)
+        filename = clip_data['filename']
+        clip_duration = clip_data['duration']
         self.clip_usage[filename].append((start_time, end_time))
         self._push_recent(filename)
         self.last_used_clip = filename
@@ -322,6 +287,36 @@ def _split_long_segments(timestamps, max_seg_duration):
     return out
 
 
+def _split_timestamps_by_longest_source_clip(timestamps, max_source_len: float, min_seg: float = DEFAULT_MIN_CLIP_DURATION):
+    """
+    Insert extra cut points so every segment is at most max_source_len seconds long.
+    Ensures each slice can be covered by the longest source file (duration == max_source_len).
+    If a remainder would be shorter than min_seg, move the cut so the last piece is at least min_seg.
+    """
+    if max_source_len is None or max_source_len <= 1e-9:
+        return timestamps
+    out = [timestamps[0]]
+    for i in range(1, len(timestamps)):
+        t_end = timestamps[i]['timestamp']
+        start = out[-1]['timestamp']
+        seg_len = t_end - start
+        if seg_len <= min_seg + 1e-9:
+            out.append(timestamps[i])
+            continue
+        while seg_len > max_source_len + 1e-6:
+            split_at = start + max_source_len
+            rem = t_end - split_at
+            if rem > 1e-9 and rem < min_seg:
+                split_at = t_end - min_seg
+                if split_at - start < min_seg + 1e-9:
+                    split_at = start + max_source_len
+            out.append({'timestamp': split_at, 'type': 'split', 'score': 0})
+            start = split_at
+            seg_len = t_end - start
+        out.append(timestamps[i])
+    return out
+
+
 def compute_segments_only(cut_points, duration, clip_manager, max_duration=None,
                          min_clip_duration=DEFAULT_MIN_CLIP_DURATION, max_clip_duration=None):
     """
@@ -334,6 +329,12 @@ def compute_segments_only(cut_points, duration, clip_manager, max_duration=None,
     cut_points = [p for p in cut_points if p['timestamp'] < duration]
     timestamps = [{'timestamp': 0, 'type': 'start', 'score': 0}] + cut_points + [{'timestamp': duration, 'type': 'end', 'score': 0}]
     timestamps = _split_long_segments(timestamps, max_clip_duration)
+    # No segment longer than the longest source clip — otherwise no file can cover it without looping.
+    if clip_manager.clips:
+        max_source = max(c['duration'] for c in clip_manager.clips)
+        timestamps = _split_timestamps_by_longest_source_clip(
+            timestamps, max_source, min_seg=min_clip_duration
+        )
     segments = []
     for i in range(len(timestamps) - 1):
         start_time = timestamps[i]['timestamp']
@@ -345,9 +346,11 @@ def compute_segments_only(cut_points, duration, clip_manager, max_duration=None,
         if not segment_info and clip_manager.clips:
             segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=False)
         if not segment_info:
-            raise RuntimeError("No clips available for segment; cannot continue.")
+            raise RuntimeError(
+                "No clip can cover a segment duration of %.3fs (check uploaded media lengths)." % segment_duration
+            )
         clip_start = segment_info['start']
-        clip_end = segment_info.get('end', clip_start + min(segment_duration, segment_info['clip_duration']))
+        clip_end = segment_info.get('end', clip_start + segment_duration)
         segments.append({
             "startTime": round(start_time, 3),
             "endTime": round(end_time, 3),
@@ -390,8 +393,9 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
             segment_specs.append({
                 'clip_path': clip_path,
                 'clip_start': clip_start,
+                'clip_end': clip_end,
                 'segment_duration': segment_duration,
-                'clip_duration': in_clip_duration,
+                'source_span': in_clip_duration,
             })
         print(f"Using {len(segment_specs)} precomputed segments...")
         # Duration = end time of last segment (user's edit), capped by audio in [song_start, end)
@@ -466,6 +470,11 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         cut_points = [p for p in cut_points if p['timestamp'] < duration]
         timestamps = [{'timestamp': 0, 'type': 'start', 'score': 0}] + cut_points + [{'timestamp': duration, 'type': 'end', 'score': 0}]
         timestamps = _split_long_segments(timestamps, max_clip_duration)
+        if clip_manager.clips:
+            max_source = max(c['duration'] for c in clip_manager.clips)
+            timestamps = _split_timestamps_by_longest_source_clip(
+                timestamps, max_source, min_seg=min_clip_duration
+            )
         max_msg = f" (max {max_clip_duration}s per clip)" if max_clip_duration else ""
         print(f"Generating {len(timestamps)-1} segments{max_msg}...")
         for i in range(len(timestamps) - 1):
@@ -478,15 +487,18 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
             if not segment_info and clip_manager.clips:
                 segment_info = clip_manager.get_segment_info(segment_duration, force_new_clip=False)
             if not segment_info:
-                raise RuntimeError("No clips available for segment; cannot continue.")
+                raise RuntimeError(
+                    "No clip can cover a segment duration of %.3fs (check uploaded media lengths)." % segment_duration
+                )
             clip_start = segment_info['start']
-            clip_end = segment_info.get('end', clip_start + min(segment_duration, segment_info['clip_duration']))
-            in_clip_duration = clip_end - clip_start
+            clip_end = segment_info.get('end', clip_start + segment_duration)
+            source_span = clip_end - clip_start
             segment_specs.append({
                 'clip_path': segment_info['path'],
                 'clip_start': clip_start,
+                'clip_end': clip_end,
                 'segment_duration': segment_duration,
-                'clip_duration': segment_info['clip_duration'],
+                'source_span': source_span,
             })
     
     # Wipe temp folder so we never reuse broken/leftover segment files
@@ -504,14 +516,15 @@ def create_video_ultrafast(audio_path, cut_points, clip_manager, output_path, ma
         clip_path = spec['clip_path']
         clip_start = spec['clip_start']
         segment_duration = spec['segment_duration']
-        clip_duration = spec['clip_duration']
+        # Length of source actually used (must be >= segment_duration to avoid loop/freeze)
+        source_span = spec.get('source_span', spec.get('clip_duration', segment_duration))
 
         # 🔥 FRAME-LOCKED DURATION (NO DRIFT)
         frame_count = max(1, int(round(segment_duration * SEGMENT_FPS)))
 
-        if clip_duration < segment_duration:
-            # LOOP CASE
-            num_loops = int(np.ceil(segment_duration / clip_duration)) + 1
+        if source_span + 1e-9 < segment_duration:
+            # LOOP CASE (legacy / hand-edited segments with short source span)
+            num_loops = int(np.ceil(segment_duration / max(source_span, 1e-9))) + 1
             loop_list = os.path.join(temp_folder, f"loop_{i:04d}.txt")
 
             abs_path = os.path.abspath(clip_path)

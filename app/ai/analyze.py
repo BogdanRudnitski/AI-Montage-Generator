@@ -19,8 +19,8 @@ CALIBRATION_JSON = "calibration.json"
 MAX_DURATION = int(os.environ.get('MAX_DURATION', '60'))
 
 # tap_mode can be overridden per-request via env var (set by backend before subprocess call).
-# Falls back to options.json value. Values: 'verbatim' | 'calibrate' | '' (AI only)
-TAP_MODE_OVERRIDE = os.environ.get('TAP_MODE', None)  # '' means AI-only, None means use options.json
+# If TAP_MODE is present in the environment (including ""), it wins over options.json.
+# If TAP_MODE is absent (e.g. CLI), options.json tap_mode is used.
 
 DENSITY_PRESETS = {
     'low':    {'min_distance': 1.0,  'score_threshold': 70,  'max_cuts': 30},
@@ -916,9 +916,10 @@ def main():
     except (TypeError, ValueError):
         pass
 
-    # Per-request override beats options.json (set by backend via TAP_MODE env var).
-    if TAP_MODE_OVERRIDE is not None:
-        tap_mode = TAP_MODE_OVERRIDE if TAP_MODE_OVERRIDE != '' else None
+    # Per-request override beats options.json (backend sets TAP_MODE for every /analyze call).
+    if "TAP_MODE" in os.environ:
+        raw = os.environ.get("TAP_MODE", "")
+        tap_mode = None if raw == "" else (raw if raw in ("verbatim", "calibrate") else None)
         print(f"🔧 TAP_MODE env override: {tap_mode!r}")
 
     first_song = target_song if target_song and target_song in audio_files else audio_files[0]

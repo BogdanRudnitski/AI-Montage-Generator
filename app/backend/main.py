@@ -756,12 +756,22 @@ async def analyze_only(body: Optional[dict] = Body(None)):
             with open(options_file, "w") as f:
                 json.dump(options, f, indent=2)
             print("[TRACE] merged body.song_start_sec into options:", options.get("song_start_sec"))
+        # Persist tap_mode from this analyze request so analyze.py never reads a stale
+        # "calibrate" from disk when the user chose full AI analysis (tap_mode null).
+        if body is not None and "tap_mode" in body:
+            tm = body.get("tap_mode")
+            options["tap_mode"] = tm if tm in ("verbatim", "calibrate") else None
+            with open(options_file, "w") as f:
+                json.dump(options, f, indent=2)
+            print("[TRACE] merged body.tap_mode into options.json:", options.get("tap_mode"))
+        requested_tap_mode = (body or {}).get("tap_mode", None) if body else None
+        if requested_tap_mode not in ("verbatim", "calibrate"):
+            requested_tap_mode = None
         max_duration = int(options.get("max_duration", 60))
         env = os.environ.copy()
         env["MAX_DURATION"] = str(max_duration)
         env["SONG_START_SEC"] = str(float(options.get("song_start_sec", 0) or 0))
-        # Prefer request tap_mode over options.json to avoid stale mode.
-        requested_tap_mode = (body or {}).get("tap_mode", None)
+        # Every /analyze run: force TAP_MODE so subprocess never falls back to stale options.
         if requested_tap_mode in ("verbatim", "calibrate"):
             env["TAP_MODE"] = requested_tap_mode
         else:

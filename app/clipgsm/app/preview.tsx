@@ -170,6 +170,7 @@ export default function PreviewScreen() {
   const lastLoopSeekAtRef = useRef<Record<number, number>>({});
   const finishedSegmentsRef = useRef<Set<number>>(new Set());
   const advanceInFlightRef = useRef(false);
+  const preloadedForSegmentRef = useRef<number>(-1);
   const slotSeekTokenRef = useRef<number[]>([0, 0, 0]);
   // Thumbnail cache by unified key (uri::time::w::h::q). In-flight deduplication for concurrent identical requests.
   const thumbnailCacheRef = useRef<Map<string, string>>(new Map());
@@ -1134,18 +1135,28 @@ export default function PreviewScreen() {
       setCurrentSegmentIndex(destinationIndex);
       if (__DEV__) debugLog("advanceTo-commit", { to: destinationIndex });
 
-      // ── Seek + play the new slot in the background — fire and forget. ──
+      // ── Seek + play the new slot — skip if preload already seeked it to start. ──
       if (toRef) {
         const token = ++slotSeekTokenRef.current[nextVisibleSlot];
-        toRef
-          .setPositionAsync(seekMs, { toleranceMillisBefore: 100, toleranceMillisAfter: 100 })
-          .then(() => {
-            if (token !== slotSeekTokenRef.current[nextVisibleSlot]) return;
-            if (isPlayingRef.current) toRef.playAsync().catch(() => {});
-          })
-          .catch(() => {
-            if (isPlayingRef.current) toRef.playAsync().catch(() => {});
-          });
+        // Check if slot is already preloaded close to target (within 200ms) — if so just play.
+        toRef.getStatusAsync().then((status) => {
+          if (token !== slotSeekTokenRef.current[nextVisibleSlot]) return;
+          const alreadyClose =
+            status.isLoaded &&
+            status.positionMillis != null &&
+            Math.abs(status.positionMillis - seekMs) < 200;
+          const play = () => { if (isPlayingRef.current) toRef.playAsync().catch(() => {}); };
+          if (alreadyClose) {
+            play();
+          } else {
+            toRef
+              .setPositionAsync(seekMs, { toleranceMillisBefore: 100, toleranceMillisAfter: 100 })
+              .then(() => { if (token !== slotSeekTokenRef.current[nextVisibleSlot]) return; play(); })
+              .catch(() => play());
+          }
+        }).catch(() => {
+          if (isPlayingRef.current) toRef.playAsync().catch(() => {});
+        });
       }
 
       // ── Pause the previous slot. ──
@@ -1304,7 +1315,30 @@ export default function PreviewScreen() {
 
         // If we've crossed into a new segment, fire advanceTo (non-blocking — doesn't stall clock).
         if (clampedIdx !== currentIndexRef.current && !isScrubbingRef.current && !isResizingRef.current) {
+          preloadedForSegmentRef.current = -1; // reset so next segment gets preloaded
           advanceTo(clampedIdx, { force: true });
+        }
+
+        // ── Early preload: seek next slot once, 0.5s before boundary. ──
+        const PRELOAD_AHEAD_SEC = 0.5;
+        const curSegIdx = currentIndexRef.current;
+        const curSeg = list[curSegIdx];
+        if (curSeg && !isScrubbingRef.current && !isResizingRef.current) {
+          const timeUntilEnd = curSeg.endTime - t;
+          if (timeUntilEnd > 0 && timeUntilEnd <= PRELOAD_AHEAD_SEC && preloadedForSegmentRef.current !== curSegIdx) {
+            preloadedForSegmentRef.current = curSegIdx;
+            const nextIdx = curSegIdx + 1;
+            const nextSeg = list[nextIdx];
+            if (nextSeg?.uri) {
+              const preloadSlot = (visiblePlaybackSlotRef.current + 1) % 3;
+              const preloadRef = videoRefs[preloadSlot]?.current;
+              if (preloadRef) {
+                const startMs = clampToFileDuration(nextSeg.uri, nextSeg.clipStart) * 1000;
+                const token = ++slotSeekTokenRef.current[preloadSlot];
+                preloadRef.setPositionAsync(startMs, { toleranceMillisBefore: 150, toleranceMillisAfter: 150 }).catch(() => {});
+              }
+            }
+          }
         }
 
         // Playback ended
