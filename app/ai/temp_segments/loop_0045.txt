@@ -1,3 +1,0 @@
-file '/Users/bogdanrudnitski/Desktop/codejam15/app/backend/uploads/media/img_3662_8f2f13b76b89.mp4'
-file '/Users/bogdanrudnitski/Desktop/codejam15/app/backend/uploads/media/img_3662_8f2f13b76b89.mp4'
-file '/Users/bogdanrudnitski/Desktop/codejam15/app/backend/uploads/media/img_3662_8f2f13b76b89.mp4'

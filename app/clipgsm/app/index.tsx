@@ -946,7 +946,7 @@ export default function ExploreScreen() {
           </View>
 
           <View style={styles.durationRow}>
-            {[15, 30, 45, 60].map((sec) => (
+            {[15, 30, 45, 60, 90].map((sec) => (
               <TouchableOpacity
                 key={sec}
                 style={[
