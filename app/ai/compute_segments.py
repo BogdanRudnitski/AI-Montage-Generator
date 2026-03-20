@@ -58,7 +58,10 @@ def main():
     data = results[selected_song]
     cut_points = data.get("cut_points", [])
     duration = float(data.get("duration", 0))
-    max_dur = data.get("max_duration") or MAX_DURATION
+    # max_duration=0 means "full song", so don't fall back to MAX_DURATION.
+    max_dur = data.get("max_duration")
+    if max_dur is None:
+        max_dur = MAX_DURATION
     duration = min(duration, max_dur) if max_dur else duration
     song_start_sec = float(data.get("song_start_sec", 0) or 0)
     if not cut_points:

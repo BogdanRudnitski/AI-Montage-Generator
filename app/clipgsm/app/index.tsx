@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
-import { Video, ResizeMode } from "expo-av";
+import { Audio, Video, ResizeMode } from "expo-av";
 import { View, Text, TouchableOpacity, Image, ScrollView, Alert, ActivityIndicator, StyleSheet, Dimensions, Switch, Modal, FlatList, TextInput, KeyboardAvoidingView, Platform } from "react-native";
 import { useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -75,8 +75,10 @@ export default function ExploreScreen() {
   const [song, setSong] = useState<{ uri: string; name: string } | null>(null);
   const [songUploading, setSongUploading] = useState(false);
   const [songUploaded, setSongUploaded] = useState(false);
+  const [songDurationSec, setSongDurationSec] = useState<number | null>(null);
   const [generateLoading, setGenerateLoading] = useState(false);
   const [duration, setDuration] = useState<number>(30);
+  const isFullLengthMode = duration <= 0;
   /** Start time (seconds) in the full track for the analysis window; must match backend/options. */
   const [songStartSec, setSongStartSec] = useState(0);
   const [showSongRangeModal, setShowSongRangeModal] = useState(false);
@@ -388,6 +390,47 @@ export default function ExploreScreen() {
       uploadSongFile();
     }
   }, [uiLocked, song, duration, songStartSec, density, aggressiveness, focusBass, focusVocals, focusRepetitions, syncToGrid]);
+
+  // Read song duration for Full-mode range copy.
+  useEffect(() => {
+    let cancelled = false;
+    let created: Audio.Sound | null = null;
+    if (!song?.uri) {
+      setSongDurationSec(null);
+      return;
+    }
+    (async () => {
+      try {
+        const { sound: sn, status } = await Audio.Sound.createAsync(
+          { uri: song.uri },
+          { shouldPlay: false }
+        );
+        created = sn;
+        const durMs =
+          status && "isLoaded" in status && status.isLoaded
+            ? (status.durationMillis ?? 0)
+            : 0;
+        if (!cancelled && durMs > 0) {
+          setSongDurationSec(durMs / 1000);
+        } else if (!cancelled) {
+          setSongDurationSec(null);
+        }
+      } catch {
+        if (!cancelled) setSongDurationSec(null);
+      } finally {
+        if (created) {
+          try {
+            await created.unloadAsync();
+          } catch {
+            // ignore
+          }
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [song?.uri]);
 
   useEffect(() => {
     if (showMusicModal) loadMusicLibrary();
@@ -945,50 +988,70 @@ export default function ExploreScreen() {
           </View>
 
           <View style={styles.durationRow}>
-            {[15, 30, 45, 60, 90].map((sec) => (
+            {[
+              { value: 15, label: "15s" },
+              { value: 30, label: "30s" },
+              { value: 60, label: "60s" },
+              { value: 90, label: "90s" },
+              { value: 0, label: "Full" },
+            ].map((opt) => (
               <TouchableOpacity
-                key={sec}
+                key={opt.label}
                 style={[
                   styles.durationButton,
-                  duration === sec && styles.durationButtonActive
+                  duration === opt.value && styles.durationButtonActive
                 ]}
                 disabled={uiLocked}
                 onPress={() => {
                   if (uiLocked) return;
-                  setDuration(sec);
+                  setDuration(opt.value);
+                  // "All" uses the whole song; start offset does not apply.
+                  if (opt.value <= 0) setSongStartSec(0);
                   setSongUploaded(false);
                 }}
                 activeOpacity={0.7}
               >
                 <Text style={[
                   styles.durationText,
-                  duration === sec && styles.durationTextActive
+                  duration === opt.value && styles.durationTextActive
                 ]}>
-                  {sec}s
+                  {opt.label}
                 </Text>
               </TouchableOpacity>
             ))}
           </View>
 
           <TouchableOpacity
-            style={[styles.songSectionButton, (!song || uiLocked) && styles.buttonDisabled]}
-            disabled={!song || uiLocked}
+            style={[
+              styles.songSectionButton,
+              (!song || uiLocked) && styles.buttonDisabled,
+              isFullLengthMode && styles.songSectionButtonDisabledFull,
+            ]}
+            disabled={!song || uiLocked || isFullLengthMode}
             onPress={() => {
-              if (!song || uiLocked) return;
+              if (!song || uiLocked || isFullLengthMode) return;
               setShowSongRangeModal(true);
             }}
             activeOpacity={0.75}
           >
-            <Ionicons name="musical-notes-outline" size={18} color={song && !uiLocked ? "#6366f1" : "#94a3b8"} />
+            <Ionicons
+              name="musical-notes-outline"
+              size={18}
+              color={song && !uiLocked && !isFullLengthMode ? "#6366f1" : "#94a3b8"}
+            />
             <View style={{ flex: 1, marginLeft: 10 }}>
-              <Text style={styles.songSectionButtonTitle}>Song Range</Text>
-              <Text style={styles.songSectionButtonSub}>
+              <Text style={[styles.songSectionButtonTitle, isFullLengthMode && styles.songSectionButtonTitleDisabled]}>
+                Song Range
+              </Text>
+              <Text style={[styles.songSectionButtonSub, isFullLengthMode && styles.songSectionButtonSubDisabled]}>
                 {song
-                  ? `from ${formatMmSs(songStartSec)} to ${formatMmSs(songStartSec + duration)} (${duration} s)`
+                  ? isFullLengthMode
+                    ? `from ${formatMmSs(songStartSec)} to ${formatMmSs(songDurationSec ?? songStartSec)} (full song)`
+                    : `from ${formatMmSs(songStartSec)} to ${formatMmSs(songStartSec + duration)} (${duration} s)`
                   : "Pick a song first"}
               </Text>
             </View>
-            <Ionicons name="options-outline" size={18} color="#94a3b8" />
+            <Ionicons name="options-outline" size={18} color={isFullLengthMode ? "#cbd5e1" : "#94a3b8"} />
           </TouchableOpacity>
         </View>
 
@@ -1023,9 +1086,9 @@ export default function ExploreScreen() {
               disabled={uiLocked || loadingTapCount}
             >
               <Ionicons
-                name={loadingTapCount ? "hourglass-outline" : songTapCount > 0 ? "refresh-circle" : "add-circle"}
+                name={loadingTapCount ? "hourglass-outline" : songTapCount > 0 ? "eye-outline" : "add-circle"}
                 size={20}
-                color={loadingTapCount ? "#fff" : songTapCount > 0 ? "#334155" : "#fff"}
+                color={loadingTapCount ? "#fff" : songTapCount > 0 ? "#6366f1" : "#fff"}
               />
               <Text style={[styles.recordTapsButtonText, songTapCount > 0 && styles.recordTapsButtonTextRerecord]}>
                 {loadingTapCount ? "Loading taps..." : songTapCount > 0 ? `View taps (${songTapCount})` : "Record taps"}
@@ -1873,6 +1936,18 @@ const styles = StyleSheet.create({
     color: "#64748b",
     marginTop: 2,
   },
+  songSectionButtonDisabledFull: {
+    backgroundColor: "#f8fafc",
+    borderColor: "#e2e8f0",
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  songSectionButtonTitleDisabled: {
+    color: "#94a3b8",
+  },
+  songSectionButtonSubDisabled: {
+    color: "#94a3b8",
+  },
   durationRow: {
     flexDirection: "row",
     gap: 12,
@@ -2196,7 +2271,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#6366f1",
   },
   recordTapsButtonRerecord: {
-    backgroundColor: "#e2e8f0",
+    backgroundColor: "#fff",
+    borderWidth: 2,
+    borderColor: "#e2e8f0",
   },
   recordTapsButtonText: {
     color: "#fff",
@@ -2204,7 +2281,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   recordTapsButtonTextRerecord: {
-    color: "#334155",
+    color: "#6366f1",
   },
   modeCard: {
     backgroundColor: "#fff",

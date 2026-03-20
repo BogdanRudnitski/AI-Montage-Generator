@@ -61,3 +61,4 @@ expo-env.d.ts
 app/ai/audio_analysis.json
 app/ai/analysis_visualization.html
 app/clipgsm/ios/
+app/ai/calibration.json
