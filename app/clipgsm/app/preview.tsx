@@ -1440,7 +1440,7 @@ export default function PreviewScreen() {
         </TouchableOpacity>
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Preview</Text>
-          <Text style={styles.headerSubtitle}>Music + clips · Export to render</Text>
+          <Text style={styles.headerSubtitle}>Trim clips and export when you’re happy</Text>
         </View>
         <TouchableOpacity
           style={styles.headerExportButton}
@@ -1507,8 +1507,8 @@ export default function PreviewScreen() {
                 </>
               ) : (
             <View style={styles.placeholder}>
-              <Text style={styles.placeholderText}>No clip for segment {currentSegmentIndex + 1}</Text>
-              <Text style={styles.placeholderHint}>Filename may not match. Check upload names.</Text>
+              <Text style={styles.placeholderText}>No video for this moment</Text>
+              <Text style={styles.placeholderHint}>Pick another clip or re-upload your media.</Text>
             </View>
           )}
           </View>

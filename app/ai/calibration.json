@@ -222,17 +222,179 @@
         "p10_gap": 0.845,
         "avg_gap": 1.491
       }
+    },
+    "Right%20Round": {
+      "type_bonuses": {
+        "bass_drop": 0,
+        "drum_high": 0,
+        "drum_low": 0,
+        "drum_mid": 0,
+        "pattern_change": 0,
+        "vocal_repetition": 5,
+        "vocal_transient": 0
+      },
+      "min_distance": 0.37,
+      "score_threshold": 26.0,
+      "density_profile": [
+        {
+          "start": 0.0,
+          "end": 4.0,
+          "target_cuts": 2,
+          "min_distance": 2.701
+        },
+        {
+          "start": 4.0,
+          "end": 8.0,
+          "target_cuts": 2,
+          "min_distance": 0.742
+        },
+        {
+          "start": 8.0,
+          "end": 12.0,
+          "target_cuts": 3,
+          "min_distance": 1.408
+        },
+        {
+          "start": 12.0,
+          "end": 16.0,
+          "target_cuts": 1,
+          "min_distance": 0.37
+        },
+        {
+          "start": 16.0,
+          "end": 20.0,
+          "target_cuts": 6,
+          "min_distance": 0.371
+        },
+        {
+          "start": 20.0,
+          "end": 24.0,
+          "target_cuts": 4,
+          "min_distance": 0.387
+        },
+        {
+          "start": 24.0,
+          "end": 28.0,
+          "target_cuts": 6,
+          "min_distance": 0.384
+        },
+        {
+          "start": 28.0,
+          "end": 32.0,
+          "target_cuts": 5,
+          "min_distance": 0.772
+        },
+        {
+          "start": 32.0,
+          "end": 36.0,
+          "target_cuts": 4,
+          "min_distance": 0.76
+        },
+        {
+          "start": 36.0,
+          "end": 40.0,
+          "target_cuts": 4,
+          "min_distance": 0.42
+        },
+        {
+          "start": 40.0,
+          "end": 44.0,
+          "target_cuts": 6,
+          "min_distance": 0.348
+        },
+        {
+          "start": 44.0,
+          "end": 48.0,
+          "target_cuts": 5,
+          "min_distance": 0.375
+        },
+        {
+          "start": 48.0,
+          "end": 52.0,
+          "target_cuts": 8,
+          "min_distance": 0.166
+        },
+        {
+          "start": 52.0,
+          "end": 56.0,
+          "target_cuts": 9,
+          "min_distance": 0.15
+        },
+        {
+          "start": 56.0,
+          "end": 60.0,
+          "target_cuts": 8,
+          "min_distance": 0.372
+        },
+        {
+          "start": 60.0,
+          "end": 64.0,
+          "target_cuts": 6,
+          "min_distance": 0.358
+        },
+        {
+          "start": 64.0,
+          "end": 68.0,
+          "target_cuts": 5,
+          "min_distance": 0.387
+        },
+        {
+          "start": 68.0,
+          "end": 72.0,
+          "target_cuts": 5,
+          "min_distance": 0.5
+        },
+        {
+          "start": 72.0,
+          "end": 76.0,
+          "target_cuts": 5,
+          "min_distance": 0.509
+        },
+        {
+          "start": 76.0,
+          "end": 80.0,
+          "target_cuts": 4,
+          "min_distance": 0.755
+        },
+        {
+          "start": 80.0,
+          "end": 84.0,
+          "target_cuts": 5,
+          "min_distance": 0.482
+        },
+        {
+          "start": 84.0,
+          "end": 88.0,
+          "target_cuts": 4,
+          "min_distance": 0.745
+        },
+        {
+          "start": 88.0,
+          "end": 90.0,
+          "target_cuts": 1,
+          "min_distance": 0.37
+        }
+      ],
+      "stats": {
+        "taps": 108,
+        "tapped_kept": 0,
+        "tapped_dismissed": 104,
+        "no_candidate": 4,
+        "p10_gap": 0.464,
+        "avg_gap": 0.831
+      }
     }
   },
   "type_bonuses": {
     "bass_drop": 0.0,
     "drum_low": 0.0,
     "drum_mid": 0.0,
-    "vocal_repetition": 3.0,
+    "vocal_repetition": 3.7,
     "vocal_transient": 0.0,
-    "drum_high": 17.0
+    "drum_high": 8.5,
+    "pattern_change": 0.0
   },
   "min_distance": 0.24,
-  "score_threshold": 10.9,
-  "songs_calibrated": 2
+  "score_threshold": 11.8,
+  "songs_calibrated": 3
 }

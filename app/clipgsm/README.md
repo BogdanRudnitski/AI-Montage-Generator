@@ -16,6 +16,16 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
    npx expo start
    ```
 
+### App icon (indigo + music note)
+
+Icons under `assets/images/` are generated from `scripts/generate_app_icons.py` (needs Pillow — use the backend venv):
+
+```bash
+../backend/venv/bin/python scripts/generate_app_icons.py
+```
+
+Then rebuild the native app or clear caches so the launcher picks up new assets.
+
 In the output, you'll find options to open the app in a
 
 - [development build](https://docs.expo.dev/develop/development-builds/introduction/)

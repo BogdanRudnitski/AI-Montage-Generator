@@ -221,9 +221,7 @@ function ClipSelectionModalInner({
     <View style={styles.backdrop}>
       <View style={styles.content}>
         <Text style={styles.title}>Choose clip range</Text>
-        <Text style={styles.subtitle}>
-          Drag the selection to pick which part of the video to use ({segmentDurationSec.toFixed(1)}s)
-        </Text>
+        <Text style={styles.subtitle}>Drag the highlight to choose part of this video</Text>
 
         {loading ? (
           <View style={[styles.strip, styles.stripLoading]}>
@@ -258,9 +256,7 @@ function ClipSelectionModalInner({
               {videoDurationSec != null ? ` of ${videoDurationSec.toFixed(1)}s` : ""}
             </Text>
             {tooShort && (
-              <Text style={styles.warning}>
-                Video is shorter than the segment; only the available range will be used.
-              </Text>
+              <Text style={styles.warning}>This clip is shorter than this section of your edit.</Text>
             )}
             {uploadError ? (
               <Text style={styles.uploadError}>{uploadError}</Text>

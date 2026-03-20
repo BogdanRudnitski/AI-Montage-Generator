@@ -332,7 +332,7 @@ export default function TapRecorderScreen() {
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipsRow}>
           {loadingTaps ? (
             <View style={styles.chip}>
-              <Text style={styles.chipText}>Loading taps...</Text>
+              <Text style={styles.chipText}>Loading…</Text>
             </View>
           ) : recentChips.map((c) => (
             <View key={`chip-${c.index}-${c.timestamp}`} style={styles.chip}>

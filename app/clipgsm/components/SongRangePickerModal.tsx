@@ -231,15 +231,11 @@ export function SongRangePickerModal({
       <View style={styles.backdrop}>
         <View style={styles.sheet}>
           <View style={styles.sheetHeader}>
-            <Text style={styles.sheetTitle}>Song section</Text>
+            <Text style={styles.sheetTitle}>Song range</Text>
             <TouchableOpacity onPress={onClose} hitSlop={12} accessibilityLabel="Close">
               <Ionicons name="close" size={26} color="#64748b" />
             </TouchableOpacity>
           </View>
-          <Text style={styles.hint}>
-            Audio loops inside the highlighted {windowDurationSec}s window. Drag the window to pick a section (audio
-            pauses while you drag, then plays from the new start).
-          </Text>
 
           {loading ? (
             <ActivityIndicator size="large" color="#6366f1" style={{ marginVertical: 32 }} />
@@ -316,7 +312,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingBottom: 28,
     paddingTop: 12,
-    minHeight: 420,
+    minHeight: 380,
   },
   sheetHeader: {
     flexDirection: "row",
@@ -328,12 +324,6 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "700",
     color: "#0f172a",
-  },
-  hint: {
-    fontSize: 13,
-    color: "#64748b",
-    lineHeight: 18,
-    marginBottom: 16,
   },
   waveWrap: {
     flexDirection: "row",

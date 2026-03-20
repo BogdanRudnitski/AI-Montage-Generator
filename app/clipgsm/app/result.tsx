@@ -1,61 +1,89 @@
-import React, { useState } from "react";
-import { View, Text, TouchableOpacity, StyleSheet, Alert, Platform } from "react-native";
+import React, { useMemo, useState } from "react";
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  Alert,
+  Platform,
+  useWindowDimensions,
+  StatusBar,
+} from "react-native";
 import { Video, ResizeMode } from "expo-av";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import * as Sharing from "expo-sharing";
 import * as FileSystem from "expo-file-system/legacy";
 import * as MediaLibrary from "expo-media-library";
 import { Ionicons } from "@expo/vector-icons";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SERVER_URL } from "../config";
 
-const SAFE_TOP = Platform.OS === "ios" ? 52 : 44;
-const BOTTOM_BAR_HEIGHT = 96;
+/** Matches preview / studio vertical frame; video uses CONTAIN inside. */
+const VIDEO_ASPECT = 9 / 16;
 
 export default function ResultScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const { width: winW, height: winH } = useWindowDimensions();
   const params = useLocalSearchParams();
   const [saving, setSaving] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [downloadedFileUri, setDownloadedFileUri] = useState<string | null>(null);
-  const [isDownloading, setIsDownloading] = useState(false);
   const videoRef = React.useRef<Video>(null);
+  const preDownloadStartedRef = React.useRef(false);
 
   const videoUrl = params.videoUrl as string;
   const videoName = params.videoName as string;
   const encodedVideoUrl = videoUrl ? encodeURI(videoUrl) : "";
   const fullVideoUrl = `${SERVER_URL}${encodedVideoUrl}`;
 
+  const safeTop =
+    insets.top > 0 ? insets.top : Platform.OS === "ios" ? 52 : StatusBar.currentHeight ?? 24;
+  /** Thin header: one row (back + text) + small vertical padding */
+  const HEADER_HEIGHT = safeTop + 8 + 44 + 12;
+  const bottomPad = Math.max(insets.bottom, 12) + 16;
+  const sidePad = 24;
+
+  const { videoW, videoH } = useMemo(() => {
+    const maxW = Math.min(winW - sidePad * 2, 340) * 0.95;
+    const idealH = maxW / VIDEO_ASPECT;
+    // Label + hint + action row + card padding (stable so video doesn’t resize when download completes)
+    const cardChrome = 16 * 2 + 28 + 10 + 12 + 54 + 8;
+    const available = winH - HEADER_HEIGHT - bottomPad - cardChrome;
+    const maxVideoH = Math.max(160, Math.min(idealH, available * 0.95));
+    const h = Math.min(idealH, maxVideoH);
+    const w = h * VIDEO_ASPECT;
+    return { videoW: w, videoH: h };
+  }, [winW, winH, HEADER_HEIGHT, bottomPad]);
+
   // Pre-download video for instant save/share
   React.useEffect(() => {
     async function preDownloadVideo() {
-      if (downloadedFileUri || isDownloading) return;
-      
+      if (preDownloadStartedRef.current || !fullVideoUrl) return;
+      preDownloadStartedRef.current = true;
+
       try {
-        setIsDownloading(true);
         const timestamp = Date.now();
-        const fileUri = `${FileSystem.documentDirectory}${timestamp}_${videoName}`;
+        const safeName = videoName || "export.mp4";
+        const fileUri = `${FileSystem.documentDirectory}${timestamp}_${safeName}`;
         const downloadResult = await FileSystem.downloadAsync(fullVideoUrl, fileUri);
-        
+
         if (downloadResult.uri) {
           setDownloadedFileUri(downloadResult.uri);
         }
       } catch (error) {
         console.error("Pre-download failed:", error);
-      } finally {
-        setIsDownloading(false);
+        preDownloadStartedRef.current = false;
       }
     }
-    
-    if (fullVideoUrl) {
-      preDownloadVideo();
-    }
-  }, [fullVideoUrl]);
+
+    preDownloadVideo();
+  }, [fullVideoUrl, videoName]);
 
   async function saveToGallery() {
     try {
       setSaving(true);
 
-      // Request permissions
       const { status } = await MediaLibrary.requestPermissionsAsync();
       if (status !== "granted") {
         Alert.alert("Permission Denied", "We need permission to save to your gallery.");
@@ -63,9 +91,8 @@ export default function ResultScreen() {
         return;
       }
 
-      // Use pre-downloaded file if available, otherwise download now
       let fileUri = downloadedFileUri;
-      
+
       if (!fileUri) {
         const timestamp = Date.now();
         fileUri = `${FileSystem.documentDirectory}${timestamp}_${videoName}`;
@@ -77,14 +104,11 @@ export default function ResultScreen() {
         throw new Error("Download failed - no URI returned");
       }
 
-      // Save to gallery
       const asset = await MediaLibrary.createAssetAsync(fileUri);
-      
-      // Try to create album, but don't fail if it exists
+
       try {
         await MediaLibrary.createAlbumAsync("Video Studio", asset, false);
       } catch {
-        // Album might already exist
         const album = await MediaLibrary.getAlbumAsync("Video Studio");
         if (album) {
           await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
@@ -105,9 +129,8 @@ export default function ResultScreen() {
     try {
       setSharing(true);
 
-      // Use pre-downloaded file if available, otherwise download now
       let fileUri = downloadedFileUri;
-      
+
       if (!fileUri) {
         const timestamp = Date.now();
         fileUri = `${FileSystem.documentDirectory}${timestamp}_${videoName}`;
@@ -119,7 +142,6 @@ export default function ResultScreen() {
         throw new Error("Download failed - no URI returned");
       }
 
-      // Check if sharing is available
       const isAvailable = await Sharing.isAvailableAsync();
       if (!isAvailable) {
         Alert.alert("Sharing Not Available", "Sharing is not supported on this device.");
@@ -127,7 +149,6 @@ export default function ResultScreen() {
         return;
       }
 
-      // Share the video
       await Sharing.shareAsync(fileUri, {
         mimeType: "video/mp4",
         dialogTitle: "Share your video",
@@ -145,116 +166,209 @@ export default function ResultScreen() {
     router.replace("/");
   }
 
+  const displayName = videoName ? videoName.replace(/\.[^/.]+$/, "") : "Your montage";
+
   return (
-    <View style={styles.container}>
-      <View style={styles.videoWrapper}>
-        <Video
-          ref={videoRef}
-          source={{ uri: fullVideoUrl }}
-          style={StyleSheet.absoluteFill}
-          useNativeControls
-          resizeMode={ResizeMode.CONTAIN}
-          shouldPlay
-          isLooping
-          onError={(e) => {
-            console.error("Video error:", e);
-            Alert.alert("Video Error", "Could not load video. Check server connection.");
-          }}
-        />
-        <TouchableOpacity
-          style={styles.backOverlay}
-          onPress={createNew}
-          activeOpacity={0.8}
-        >
-          <Ionicons name="arrow-back" size={26} color="#fff" />
-        </TouchableOpacity>
+    <View style={styles.screen}>
+      <View style={[styles.header, { paddingTop: safeTop + 8, paddingBottom: 12 }]}>
+        <View style={styles.headerBackground} />
+
+        <View style={styles.headerRow}>
+          <TouchableOpacity
+            style={styles.headerBackBtn}
+            onPress={createNew}
+            activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel="Back to studio"
+          >
+            <Ionicons name="arrow-back" size={22} color="#6366f1" />
+          </TouchableOpacity>
+          <View style={styles.headerTitles}>
+            <Text style={styles.headerTitle} numberOfLines={1}>
+              Export ready
+            </Text>
+            <Text style={styles.headerSubtitle} numberOfLines={1}>
+              {displayName}
+            </Text>
+          </View>
+        </View>
       </View>
 
-      {/* Bottom bar: Download + Share */}
-      <View style={styles.bottomBar}>
-        <TouchableOpacity
-          style={[styles.bottomButton, styles.downloadButton]}
-          onPress={saveToGallery}
-          disabled={saving}
-          activeOpacity={0.85}
-        >
-          <Ionicons name="download-outline" size={24} color="#fff" />
-          <Text style={styles.bottomButtonText}>{saving ? "Saving" : "Save"}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.bottomButton, styles.shareButton]}
-          onPress={shareVideo}
-          disabled={sharing}
-          activeOpacity={0.85}
-        >
-          <Ionicons name="share-outline" size={24} color="#fff" />
-          <Text style={styles.bottomButtonText}>{sharing ? "Preparing" : "Share"}</Text>
-        </TouchableOpacity>
+      <View style={[styles.body, { paddingBottom: bottomPad }]}>
+        <View style={[styles.videoCard, { maxWidth: winW - sidePad * 2 }]}>
+          <Text style={styles.cardLabel}>Preview</Text>
+
+          <View style={[styles.videoFrame, { width: videoW, height: videoH }]}>
+            <Video
+              ref={videoRef}
+              source={{ uri: fullVideoUrl }}
+              style={StyleSheet.absoluteFillObject}
+              useNativeControls
+              resizeMode={ResizeMode.CONTAIN}
+              shouldPlay
+              isLooping
+              onError={(e) => {
+                console.error("Video error:", e);
+                Alert.alert("Video Error", "Could not load video. Check server connection.");
+              }}
+            />
+          </View>
+
+          <View style={styles.actionsRow}>
+            <TouchableOpacity
+              style={[styles.actionButton, styles.actionOutline]}
+              onPress={saveToGallery}
+              disabled={saving}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="download-outline" size={20} color="#6366f1" />
+              <Text style={styles.actionOutlineText}>{saving ? "Saving…" : "Save"}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.actionButton, styles.actionPrimary]}
+              onPress={shareVideo}
+              disabled={sharing}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="share-outline" size={20} color="#fff" />
+              <Text style={styles.actionPrimaryText}>{sharing ? "Preparing…" : "Share"}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  screen: {
     flex: 1,
-    backgroundColor: "#000",
+    backgroundColor: "#f5f7fb",
   },
-  videoWrapper: {
-    flex: 1,
+  header: {
+    paddingHorizontal: 20,
     position: "relative",
+    overflow: "hidden",
   },
-  backOverlay: {
-    position: "absolute",
-    top: SAFE_TOP,
-    left: 16,
+  headerBackground: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#6366f1",
+  },
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    zIndex: 2,
+    minHeight: 44,
+  },
+  headerBackBtn: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: "rgba(0,0,0,0.45)",
+    backgroundColor: "#fff",
     justifyContent: "center",
     alignItems: "center",
-  },
-  bottomBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 12,
-    height: BOTTOM_BAR_HEIGHT,
-    paddingHorizontal: 20,
-    paddingBottom: Platform.OS === "ios" ? 28 : 20,
-    backgroundColor: "rgba(0,0,0,0.7)",
-  },
-  bottomButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    paddingVertical: 14,
-    paddingHorizontal: 24,
-    borderRadius: 999,
-    minWidth: 120,
-  },
-  downloadButton: {
-    backgroundColor: "#10b981",
-    shadowColor: "#10b981",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.35,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  shareButton: {
-    backgroundColor: "#6366f1",
     shadowColor: "#6366f1",
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.35,
+    shadowOpacity: 0.2,
     shadowRadius: 6,
-    elevation: 4,
+    elevation: 3,
   },
-  bottomButtonText: {
+  headerTitles: {
+    flex: 1,
+    marginLeft: 12,
+    minWidth: 0,
+    justifyContent: "center",
+  },
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: "900",
     color: "#fff",
-    fontSize: 16,
-    fontWeight: "700",
-    letterSpacing: 0.2,
+    letterSpacing: -0.3,
+  },
+  headerSubtitle: {
+    fontSize: 13,
+    color: "rgba(255, 255, 255, 0.9)",
+    fontWeight: "600",
+    marginTop: 2,
+  },
+  body: {
+    flex: 1,
+    justifyContent: "center",
+    paddingHorizontal: 24,
+  },
+  videoCard: {
+    width: "100%",
+    alignSelf: "center",
+    backgroundColor: "#fff",
+    borderRadius: 22,
+    paddingTop: 14,
+    paddingBottom: 16,
+    paddingHorizontal: 16,
+    alignItems: "center",
+    shadowColor: "#0f172a",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 14,
+    elevation: 4,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  cardLabel: {
+    alignSelf: "flex-start",
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#64748b",
+    textTransform: "uppercase",
+    letterSpacing: 0.55,
+    marginBottom: 10,
+    marginLeft: 2,
+  },
+  videoFrame: {
+    alignSelf: "center",
+    borderRadius: 14,
+    overflow: "hidden",
+    backgroundColor: "#0f172a",
+  },
+  actionsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 16,
+    width: "100%",
+  },
+  actionButton: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingVertical: 13,
+    borderRadius: 14,
+    minWidth: 0,
+  },
+  actionOutline: {
+    backgroundColor: "#fff",
+    borderWidth: 2,
+    borderColor: "#6366f1",
+  },
+  actionOutlineText: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: "#6366f1",
+    letterSpacing: -0.2,
+  },
+  actionPrimary: {
+    backgroundColor: "#6366f1",
+    shadowColor: "#6366f1",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+    elevation: 5,
+  },
+  actionPrimaryText: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: "#fff",
+    letterSpacing: -0.2,
   },
 });

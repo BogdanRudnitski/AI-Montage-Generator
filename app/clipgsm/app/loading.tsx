@@ -15,7 +15,7 @@ export default function LoadingScreen() {
 
   const [progress, setProgress] = useState(0);
 
-  const [status, setStatus] = useState(isExport ? "Preparing export" : "Initializing");
+  const [status, setStatus] = useState(isExport ? "Starting…" : "Starting…");
   const hasNavigated = useRef(false);
 
   // Export mode: run POST /export, then navigate to result
@@ -34,10 +34,10 @@ export default function LoadingScreen() {
     const last = segments.length > 0 ? segments[segments.length - 1] : null;
     // Fake progress: keep it slower + lower so it doesn't "race ahead" of real work.
     const progressSteps = [
-      { time: 900, progress: 12, status: "Exporting" },
-      { time: 3200, progress: 28, status: "Rendering segments" },
-      { time: 6200, progress: 48, status: "Mixing video" },
-      { time: 10500, progress: 68, status: "Finalizing" },
+      { time: 900, progress: 12, status: "Working on it…" },
+      { time: 3200, progress: 28, status: "Still going…" },
+      { time: 6200, progress: 48, status: "Almost there…" },
+      { time: 10500, progress: 68, status: "Finishing up…" },
     ];
     progressSteps.forEach(({ time, progress: p, status: s }) => {
       setTimeout(() => {
@@ -101,13 +101,13 @@ export default function LoadingScreen() {
 
     // Fake progress: slower ramp so it doesn't feel stuck at the end or jump too fast.
     const progressSteps = [
-      { time: 1400, progress: 8, status: "Analyzing audio..." },
-      { time: 4600, progress: 22, status: "Detecting beats..." },
-      { time: 7600, progress: 38, status: "Finding vocal patterns..." },
-      { time: 11500, progress: 55, status: "Identifying bass drops..." },
-      { time: 16500, progress: 70, status: "Cutting video segments..." },
-      { time: 21500, progress: 82, status: "Syncing to music..." },
-      { time: 26500, progress: 90, status: "Finalizing video..." },
+      { time: 1400, progress: 8, status: "Working…" },
+      { time: 4600, progress: 22, status: "Still working…" },
+      { time: 7600, progress: 38, status: "Hang tight…" },
+      { time: 11500, progress: 55, status: "Almost ready…" },
+      { time: 16500, progress: 70, status: "Almost ready…" },
+      { time: 21500, progress: 82, status: "Wrapping up…" },
+      { time: 26500, progress: 90, status: "Wrapping up…" },
     ];
     progressSteps.forEach(({ time, progress: p, status: s }) => {
       setTimeout(() => {
@@ -145,10 +145,8 @@ export default function LoadingScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>{isExport ? "Exporting" : "Creating video"}</Text>
-        <Text style={styles.headerSubtitle}>
-          {isExport ? "Rendering your video" : "Analyzing audio + preparing cuts"}
-        </Text>
+        <Text style={styles.headerTitle}>{isExport ? "Exporting" : "Creating your video"}</Text>
+        <Text style={styles.headerSubtitle}>This may take a minute</Text>
       </View>
 
       <View style={styles.content}>

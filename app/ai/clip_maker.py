@@ -5,6 +5,8 @@ import random
 import re
 import shutil
 import subprocess
+from urllib.parse import unquote
+
 import numpy as np
 
 from pathlib import Path
@@ -83,7 +85,8 @@ OUTPUT_VF = f'scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:force_original_aspect_ratio=d
 VIDEO_ENCODER = detect_best_encoder()
 
 def sanitize_filename(filename: str) -> str:
-    """Remove or replace problematic characters in filenames"""
+    """Remove or replace problematic characters in filenames."""
+    filename = unquote(str(filename).strip())
     # Keep the extension
     name, ext = os.path.splitext(filename)
     
@@ -749,7 +752,7 @@ def main():
             print(f"Audio file not found for: {target_song}")
             print(f"   Searched in: {audio_folder_abs}\n")
             return
-        video_filename = base_target + '_final.mp4'
+        video_filename = base_target + ".mp4"
         video_filename = sanitize_filename(video_filename)
         output_path = os.path.join(output_folder_abs, video_filename)
         print(f"Export: {target_song} -> {video_filename}\n")
@@ -861,7 +864,7 @@ def main():
         return
     
     # SANITIZE OUTPUT FILENAME - THIS IS THE KEY FIX!
-    video_filename = selected_song.rsplit('.', 1)[0] + '_final.mp4'
+    video_filename = selected_song.rsplit(".", 1)[0] + ".mp4"
     video_filename = sanitize_filename(video_filename)  # Clean the filename
     output_path = os.path.join(output_folder_abs, video_filename)
     

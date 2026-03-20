@@ -866,7 +866,6 @@ export default function ExploreScreen() {
               <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setNameTrackModal(null)} />
               <View style={styles.nameTrackModalContent} onStartShouldSetResponder={() => true}>
                 <Text style={styles.nameTrackModalTitle}>Name this track</Text>
-                <Text style={styles.nameTrackModalHint}>Audio is saved to app storage and persists between sessions.</Text>
                 <View style={styles.nameTrackModalBody}>
                   <TouchableOpacity style={styles.nameTrackArtSquare} onPress={pickCoverArtForTrack} activeOpacity={0.85}>
                     {nameTrackArtUri ? (
@@ -1268,12 +1267,6 @@ export default function ExploreScreen() {
                       />
                     </View>
 
-                    <View style={styles.advancedHint}>
-                      <Ionicons name="information-circle" size={16} color="#6366f1" />
-                      <Text style={styles.advancedHintText}>
-                        Tip: Start with Medium density and 70% aggressiveness, then adjust to taste
-                      </Text>
-                    </View>
                   </View>
                 )}
               </View>
@@ -1838,8 +1831,7 @@ const styles = StyleSheet.create({
   musicModalCancelText: { fontSize: 15, fontWeight: "600", color: "#64748b" },
   nameTrackModalBackdrop: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "rgba(0,0,0,0.5)" },
   nameTrackModalContent: { width: Math.min(width * 0.92, 440), backgroundColor: "#fff", borderRadius: 20, padding: 24 },
-  nameTrackModalTitle: { fontSize: 22, fontWeight: "800", color: "#0f172a", marginBottom: 4 },
-  nameTrackModalHint: { fontSize: 12, color: "#64748b", marginBottom: 16 },
+  nameTrackModalTitle: { fontSize: 22, fontWeight: "800", color: "#0f172a", marginBottom: 18 },
   nameTrackModalBody: { flexDirection: "row", marginBottom: 24, gap: 20 },
   nameTrackArtSquare: { width: ART_SQUARE_SIZE, height: ART_SQUARE_SIZE, borderRadius: 14, overflow: "hidden", backgroundColor: "#f1f5f9" },
   nameTrackArtSquareImage: { width: ART_SQUARE_SIZE, height: ART_SQUARE_SIZE },
@@ -2109,22 +2101,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: "#64748b",
     fontWeight: "600",
-  },
-  advancedHint: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: "#eef2ff",
-    padding: 14,
-    borderRadius: 12,
-    marginTop: 16,
-  },
-  advancedHintText: {
-    fontSize: 12,
-    color: "#6366f1",
-    fontWeight: "600",
-    flex: 1,
-    lineHeight: 18,
   },
   generateButton: {
     backgroundColor: "#6366f1",
