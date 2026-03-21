@@ -613,11 +613,11 @@ def analyze_audio_advanced(
     if tap_mode == 'verbatim':
         taps = load_taps(song_filename)
         if taps is None:
-            print("⚠️  No tap file found — falling back to AI analysis.\n")
+            print("No tap file found — falling back to AI analysis.\n")
             tap_mode = None
         else:
             cut_points = taps_to_cut_points(taps, max_duration or duration, song_start_sec=song_start_sec)
-            print(f"✅ Using {len(cut_points)} manual taps verbatim\n")
+            print(f"Using {len(cut_points)} manual taps verbatim\n")
 
             # Still get BPM from drums for metadata
             mono = np.mean(wav_np, axis=0)
